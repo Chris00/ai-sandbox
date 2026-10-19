@@ -1,189 +1,286 @@
 #!/bin/bash
+#
+# ai — run a shell (or a command) for an AI agent inside a bubblewrap
+# sandbox.
+#
+# Usage: ai [--ssh] [-w|--work DIR] [--] [COMMAND [ARG...]]
+#
+# The work directory DIR is mounted read-write at /work.  The real
+# ".git" directory of every Git repo in it is hidden: the sandbox sees
+# a clone kept in $GIT_BACKUP instead, so the AI cannot alter your
+# history, config or hooks.  Your real repo is visible read-only under
+# /upstream, so "git fetch origin" inside the sandbox picks up your
+# latest commits.  To bring the AI's commits back, in your real repo:
+#
+#     git fetch ai
+#     git diff ai/main        # review; empty when the files match
+#     git reset ai/main       # move the branch, keep the files
+#
+# From the host, only ever *fetch from* the copies.  Never push into
+# them or run Git commands inside them: their configuration and hooks
+# are under the AI's control.
 
-# Different configuration files for the AI.
 AIHOME="$HOME/AI/home"
 GIT_BACKUP="$HOME/AI/work"
 
-if [ ! -d "$AIHOME" ]; then
-    echo "Create the directory '$AIHOME' with minimal configuration files."
+die() {
+    echo "ai: $*" >&2
     exit 1
-fi
+}
 
-if ! command -v slirp4netns >/dev/null; then
-    echo "slirp4netns is not installed (e.g. 'apt install slirp4netns')." >&2
-    exit 1
-fi
+# --- Options ------------------------------------------------------------
 
-tmp_net=$(mktemp -d "ai.XXXXXXXX") || exit 1
-
+ssh=
+work_path=
 cmd=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
 	--ssh)
-	    SSH=1
+	    ssh=1
 	    shift
 	    ;;
 	-w|--work)
-	    work_path=$(realpath -e -- "$2" 2>/dev/null)
-	    if [ -z "$work_path" ]; then
-		echo "The path \"$path\" does not exist.  Exiting."
-		exit 1
-	    fi
-	    shift; shift
+	    [ $# -ge 2 ] || die "$1 needs a directory."
+	    work_path=$(realpath -e -- "$2" 2>/dev/null) ||
+		die "The path \"$2\" does not exist."
+	    [ -d "$work_path" ] || die "\"$2\" is not a directory."
+	    shift 2
+	    ;;
+	--)
+	    shift
+	    cmd=("$@")
+	    break
 	    ;;
 	-*)
-	    echo "Unknown option $1" >&2
-	    exit 1
+	    die "Unknown option $1"
 	    ;;
 	*)
-	    cmd+=("$1") # save positional arg
-	    shift
+	    # The command and all its arguments, options included.
+	    cmd=("$@")
+	    break
 	    ;;
     esac
 done
 
-function git {
+# --- Checks -------------------------------------------------------------
+
+[ -d "$AIHOME" ] ||
+    die "Create the directory '$AIHOME' with minimal configuration files."
+[ -x /usr/bin/bwrap ] ||
+    die "bubblewrap is not installed (e.g. 'apt install bubblewrap')."
+command -v slirp4netns >/dev/null ||
+    die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
+
+if [ -n "$ssh" ] && [ ! -S "$SSH_AUTH_SOCK" ]; then
+    die "--ssh: no SSH agent socket found."
+fi
+
+if [ -n "$work_path" ]; then
+    if [ "$work_path" = / ]; then
+	die "Refusing to expose the whole file system."
+    fi
+    case $HOME/ in
+	"$work_path"/*)
+	    die "Refusing to expose your whole home directory ($work_path)." ;;
+    esac
+    case $work_path/ in
+	"$HOME/AI"/*)
+	    die "Refusing to expose the sandbox's own files ($work_path)." ;;
+    esac
+fi
+
+# --- Temporary files (removed on exit) ----------------------------------
+
+tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
+slirp=
+trap '[ -n "$slirp" ] && kill "$slirp" 2>/dev/null; rm -rf -- "$tmp"' EXIT
+mkfifo "$tmp/info" "$tmp/block" || exit 1
+# slirp4netns provides a DNS forwarder at 10.0.2.3.
+printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
+
+# --- Helpers ------------------------------------------------------------
+
+# Host-side Git: never run hooks or the fsmonitor.
+git() {
     /usr/bin/git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
-function rel_to_pwd {
+rel_to_pwd() {
     case $1 in
-	"$PWD")    rel=. ;;
-	"$PWD"/*)  rel=./${1#"$PWD"/} ;;
-	*)         rel=$repo ;;  # not under the current directory
+	"$PWD")   echo . ;;
+	"$PWD"/*) echo "./${1#"$PWD"/}" ;;
+	*)        echo "$1" ;;  # not under the current directory
     esac
-    echo "$rel"
 }
 
+if [ -t 1 ]; then
+    red=$'\e[31m' normal=$'\e[0m'
+else
+    red= normal=
+fi
+
+# Hide the real .git of each repo under $work_path behind a clone in
+# $GIT_BACKUP, and show the real one read-only under /upstream.
+protect_repos() {
+    local f g repo rel_home copy upstream answer
+    local -a links repos
+
+    # Submodules and worktrees have a ".git" *file*: their Git data is
+    # elsewhere and not mounted, so Git will not work on them inside.
+    mapfile -d '' -t links < <(
+	find "$work_path" -name .git \( -type d -prune -o -type f -print0 \)
+    )
+    for f in "${links[@]}"; do
+	echo "Not handled (submodule or worktree): $(rel_to_pwd "${f%/.git}")" >&2
+    done
+
+    # Shallowest first, so that an enclosing repo is cloned before the
+    # repos nested in it (Git refuses to clone into a non-empty dir).
+    mapfile -d '' -t repos < <(
+	find "$work_path" -name .git -type d -prune -printf '%d\t%p\0' |
+	    LC_ALL=C sort -z -n -s -k1,1 |
+	    cut -z -f2-
+    )
+
+    for g in "${repos[@]}"; do
+	repo=${g%/.git}
+	rel_home=${repo#"$HOME"/}
+	copy="$GIT_BACKUP/$rel_home"
+	# The ".git" suffix keeps nested repos on separate mount points.
+	upstream="/upstream/$rel_home.git"
+
+	printf 'Git %s%s%s → %s\n' "$red" "$(rel_to_pwd "$repo")" "$normal" "$copy"
+
+	if [ ! -d "$copy/.git" ]; then
+	    # No copy yet: either a repo of yours seen for the first time,
+	    # or one the AI created in the shared tree in an earlier
+	    # session, whose configuration would be untrusted.
+	    read -r -p "  New repo: did you create it yourself? [y/N] " answer \
+		 </dev/tty
+	    [[ $answer == [yY]* ]] || die "Not trusting $repo."
+
+	    mkdir -p -- "$(dirname -- "$copy")" || exit 1
+	    # Cloning reads the source through upload-pack, which is
+	    # safe even in an untrusted repo.
+	    git clone --no-local --no-checkout --quiet -- "$repo" "$copy" ||
+		exit 1
+	    # Safe: the copy was just created.  Fill its index from HEAD
+	    # (fails harmlessly on a repo without commits) and point its
+	    # origin at the read-only view of your repo in the sandbox.
+	    git -C "$copy" reset --quiet 2>/dev/null
+	    git -C "$copy" remote set-url origin "$upstream"
+	    # Writing the config file directly runs nothing.
+	    /usr/bin/git config --file "$g/config" --remove-section remote.ai \
+			 2>/dev/null
+	    /usr/bin/git config --file "$g/config" remote.ai.url "$copy"
+	    /usr/bin/git config --file "$g/config" remote.ai.fetch \
+			 '+refs/heads/*:refs/remotes/ai/*'
+	fi
+
+	args+=(
+	    --bind "$copy/.git" "/work/${g#"$work_path"/}"
+	    --ro-bind "$g" "$upstream"
+	)
+    done
+}
+
+# --- Sandbox ------------------------------------------------------------
+
 args=(
-  --die-with-parent
-  --new-session
-  --unshare-all
+    --die-with-parent
+    --new-session
+    --unshare-all
 
-  --clearenv
-  --setenv PATH /usr/bin:/bin
-  --setenv TERM "$TERM"
-  --setenv LANG "${LANG:-C.UTF-8}"
+    --clearenv
+    --setenv PATH /usr/bin:/bin
+    --setenv TERM "$TERM"
+    --setenv LANG "${LANG:-C.UTF-8}"
 
-  --dev /dev
-  --proc /proc
-  --tmpfs /tmp
+    --dev /dev
+    --proc /proc
+    --tmpfs /tmp
 
-  --ro-bind /usr /usr
-  --ro-bind /lib /lib
-  --ro-bind-try /lib64 /lib64
-  --ro-bind /bin /bin
-  --ro-bind /etc/alternatives /etc/alternatives
-  --ro-bind /etc/resolv.conf /etc/resolv.conf
-  --ro-bind /etc/hosts /etc/hosts
-  --ro-bind /etc/ssl /etc/ssl
-  --ro-bind /etc/passwd /etc/passwd
-  --ro-bind /etc/group /etc/group
-  --unshare-user
-  --bind "$AIHOME/" "$HOME/"
-  --setenv HOME "$HOME"
-  --setenv USER "$USER"
+    --ro-bind /usr /usr
+    --ro-bind /lib /lib
+    --ro-bind-try /lib64 /lib64
+    --ro-bind /bin /bin
+    --ro-bind /etc/alternatives /etc/alternatives
+    --ro-bind "$tmp/resolv.conf" /etc/resolv.conf
+    --ro-bind /etc/hosts /etc/hosts
+    --ro-bind /etc/ssl /etc/ssl
+    --ro-bind /etc/passwd /etc/passwd
+    --ro-bind /etc/group /etc/group
+    --ro-bind-try /etc/localtime /etc/localtime
+    --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache
+    --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
+    --unshare-user
+    --bind "$AIHOME/" "$HOME/"
+    --setenv HOME "$HOME"
+    --setenv USER "$USER"
 )
 
-if [ -n "$SSH" ]; then
-    if [ ! -S "$SSH_AUTH_SOCK" ]; then
-	echo "--ssh: no SSH agent socket found." >&2
-	exit 1
-    fi
+if [ -n "$ssh" ]; then
+    # Only the agent socket itself: its directory may hold other
+    # sockets, such as the D-Bus session bus.
     args+=(
 	--ro-bind-try "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts"
 	--bind "$SSH_AUTH_SOCK" "$SSH_AUTH_SOCK"
-        --setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"
+	--setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"
     )
 fi
 
 if [ -n "$work_path" ]; then
-    # Bind the $work_path outside $HOME (on / which is a temporary
-    # file system) as otherwise the directories will also be created
-    # in $AIHOME.
+    # Mount outside $HOME: / is a tmpfs, so no mount point is left
+    # behind in $AIHOME.
     args+=(
-	--bind "$work_path" "/work"
-	--chdir "/work"
+	--bind "$work_path" /work
+	--chdir /work
     )
-    rel_work_path=${work_path#"$HOME"/}
-    if [ "$rel_work_path" = "$work_path" ]; then
-	# We may want to expriment, say in /tmp directories
-	echo "$work_path is not in HOME.  Git repos are not protected."
+    if [ "${work_path#"$HOME"/}" = "$work_path" ]; then
+	# E.g. to experiment in a /tmp directory.
+	echo "$work_path is not under \$HOME: its Git repos are NOT protected." >&2
     else
-	# If there are git subdirectories, use a clone to ensure the
-	# history is not tempered with.
-	mapfile -d '' -t repos < <(
-	    find "$work_path" -name .git -prune -printf '%d\t%p\0' |
-	    sort -z -n -s -k1,1 |
-	    cut -z -f2-
-	)
-
-	for g in "${repos[@]}"; do
-	    repo="${g%/.git}"
-	    rel_pwd=$(rel_to_pwd "$repo")
-	    rel_home=${repo#"$HOME"/}
-	    copy="$GIT_BACKUP/$rel_home"
-	    echo -e "Git [31m$rel_pwd[0m → $copy"
-	    if [ ! -d "$copy/.git" ]; then
-	        mkdir -p -- "$(dirname -- "$copy")"
-	        git clone --no-local --quiet -- "$repo" "$copy" || exit 1
-		git -C "$repo" remote remove ai || true
-	        git -C "$repo" remote add ai "$copy"
-	    else
-	        for b in main master; do
-	    	if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then
-	    	    git -C "$repo" push ai "$b" 2>/dev/null
-	    	    break
-	    	fi
-	        done
-	    fi
-	    work_repo=$(realpath --relative-to="$work_path" "$g")
-	    args+=(--bind "$copy/.git" "/work/$work_repo")
-	    # Sorting is necerssary so that "top level" Git are
-	    # created first (otherwise Git will complain that the dir
-	    # exists and is not empty).
-	done < <(LC_ALL=C find "$work_path" -name .git -prune -print0 | sort -z)
+	protect_repos
     fi
 else
-    # No work directory bound.  For example to install packages, AI
-    # tools,... in $HOME.
-    args+=(--chdir $HOME)
+    # No work directory, e.g. to install packages or AI tools in $HOME.
+    args+=(--chdir "$HOME")
 fi
 
-# Better than --share-net as --share-net shares the host’s network
-# namespace. The sandbox can reach services listening on the host’s
-# localhost, such as databases, dev servers or CUPS.
-slirp=
-trap '[ -n "$slirp" ] && kill "$slirp" 2>/dev/null; rm -rf -- "$tmp_net"' EXIT
-mkfifo "$tmp_net/info" "$tmp_net/block"
-# slirp4netns provides a DNS forwarder at 10.0.2.3.
-printf 'nameserver 10.0.2.3\n' >"$tmp_net/resolv.conf"
+if [ ${#cmd[@]} -eq 0 ]; then
+    # Allocate a pseudo-terminal for bash (so one has job control with
+    # Ctrl-Z, fg, bg):
+    cmd=(script -qc 'bash -i' /dev/null)
+fi
 
-# Wait for bwrap to report the sandbox PID, then attach the network to it.
-# slirp4netns writes to the block pipe when ready, which releases bwrap.
+# --- Network ------------------------------------------------------------
+
+# slirp4netns rather than --share-net: sharing the host's network
+# namespace would let the sandbox reach services listening on the
+# host's localhost (databases, dev servers, CUPS...).
+#
+# Wait for bwrap to report the sandbox PID, then attach the network to
+# it.  slirp4netns writes to the block pipe when ready, which releases
+# bwrap.
 (
     while IFS= read -r line; do
 	if [[ $line =~ \"child-pid\":\ *([0-9]+) ]]; then
 	    pid=${BASH_REMATCH[1]}
 	    break
 	fi
-    done <"$tmp_net/info"
+    done <"$tmp/info"
     [ -n "$pid" ] || exit 1
     exec slirp4netns --configure --mtu=65520 --disable-host-loopback \
 	 --enable-sandbox --enable-seccomp \
-	 --ready-fd=3 "$pid" tap0 3>"$tmp_net/block" >/dev/null
+	 --ready-fd=3 "$pid" tap0 3>"$tmp/block" >/dev/null
 ) &
 slirp=$!
 
+# --- Run ----------------------------------------------------------------
 
-if [ -z "${cmd[0]}" ]; then
-    # Allocate a pseudo-terminal for bash (so one has job control with
-    # Ctrl-Z, fg, bg):
-    cmd=(script -qc 'bash -i' /dev/null)
-fi
-
+# The block pipe is opened read-write: read-only would wait for a
+# writer, and slirp4netns only opens it once bwrap has started.
 /usr/bin/bwrap --info-fd 3 --block-fd 4 "${args[@]}" "${cmd[@]}" \
-    3>"$tmp_net/info" 4<>"$tmp_net/block"
+	       3>"$tmp/info" 4<>"$tmp/block"
 exit $?
-
