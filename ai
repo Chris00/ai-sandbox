@@ -71,6 +71,10 @@ done
     die "bubblewrap is not installed (e.g. 'apt install bubblewrap')."
 command -v slirp4netns >/dev/null ||
     die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
+command -v nsenter >/dev/null ||
+    die "nsenter is not installed (e.g. 'apt install util-linux')."
+nsenter --help | grep -q -- --user-parent ||
+    die "nsenter is too old, it does not support '--user-parent'."
 
 if [ -n "$ssh" ] && [ ! -S "$SSH_AUTH_SOCK" ]; then
     die "--ssh: no SSH agent socket found."
@@ -277,22 +281,24 @@ fi
 	fi
     done <"$tmp/info"
     [ -n "$pid" ] || exit 1
-    # bwrap moves the sandbox into a nested user namespace, so
-    # /proc/$pid/ns/user is not the one owning the network namespace.
-    # NS_GET_USERNS returns the owner; both are passed as open fds.
-    exec python3 -I -c '
-import fcntl, os, sys
-NS_GET_USERNS = 0xB701
-pid, args = sys.argv[1], sys.argv[2:]
-net = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
-user = fcntl.ioctl(net, NS_GET_USERNS)
-os.set_inheritable(net, True)
-os.set_inheritable(user, True)
-os.execvp("slirp4netns", ["slirp4netns", *args,
-          f"--userns-path=/proc/self/fd/{user}",
-          "--netns-type=path", f"/proc/self/fd/{net}", "tap0"])
-' "$pid" --configure --mtu=65520 --disable-host-loopback \
-	 --enable-seccomp --ready-fd=3 3>"$tmp/block" >/dev/null
+    # The user namespace owning the sandbox's network namespace.  bwrap
+    # later moves the sandbox into a namespace nested in it.
+    owner=$(lsns -t net -p "$pid" -n -o ONS) || exit 1
+    owner="user:[${owner//[[:space:]]/}]"
+    for _ in {1..200}; do
+	[ "$(readlink "/proc/$pid/ns/user")" != "$owner" ] && break
+	sleep 0.01
+    done
+    if [ "$(readlink "/proc/$pid/ns/user")" != "$owner" ]; then
+	userns=(--user --user-parent)    # nested: join its parent
+    else
+	userns=(--user)                  # not nested (yet)
+    fi
+    exec nsenter --target "$pid" "${userns[@]}" --preserve-credentials \
+	 slirp4netns --configure --mtu=65520 --disable-host-loopback \
+	 --enable-sandbox --enable-seccomp \
+	 --ready-fd=3 --netns-type=path "/proc/$pid/ns/net" tap0 \
+	 3>"$tmp/block" >/dev/null
 ) &
 slirp=$!
 
