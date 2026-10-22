@@ -93,11 +93,17 @@ fi
 # --- Temporary files (removed on exit) ----------------------------------
 
 tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
+# `slirp` will hold (see below) the process ID of the background job
+# that runs slirp4netns, so the EXIT trap knows what to kill.
 slirp=
 trap '[ -n "$slirp" ] && kill "$slirp" 2>/dev/null; rm -rf -- "$tmp"' EXIT
 mkfifo "$tmp/info" "$tmp/block" || exit 1
 # slirp4netns provides a DNS forwarder at 10.0.2.3.
 printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
+
+getent passwd "$(id -u)" >"$tmp/passwd"
+getent group "$(id -g)" >"$tmp/group"
+printf 'passwd: files\ngroup: files\nhosts: files dns\n' >"$tmp/nsswitch.conf"
 
 # --- Helpers ------------------------------------------------------------
 
@@ -205,15 +211,15 @@ args=(
     --ro-bind /lib /lib
     --ro-bind-try /lib64 /lib64
     --ro-bind /bin /bin
-    --ro-bind /etc/alternatives /etc/alternatives
+    --ro-bind-try /etc/alternatives /etc/alternatives
     --ro-bind "$tmp/resolv.conf" /etc/resolv.conf
     --ro-bind /etc/hosts /etc/hosts
     --ro-bind /etc/ssl /etc/ssl
-    --ro-bind /etc/passwd /etc/passwd
-    --ro-bind /etc/group /etc/group
+    --ro-bind "$tmp/passwd" /etc/passwd
+    --ro-bind "$tmp/group" /etc/group
     --ro-bind-try /etc/localtime /etc/localtime
     --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache
-    --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
+    --ro-bind "$tmp/nsswitch.conf" /etc/nsswitch.conf
     --unshare-user
     --bind "$AIHOME/" "$HOME/"
     --setenv HOME "$HOME"
