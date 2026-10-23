@@ -101,54 +101,6 @@ if [ -n "$work_path" ]; then
     esac
 fi
 
-# --- Temporary files (removed on exit) ----------------------------------
-
-tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
-# `slirp` will hold (see below) the process ID of the background job
-# that runs slirp4netns, so the EXIT trap knows what to kill.
-slirp=
-agent_pid=
-
-cleanup() {
-    local new
-    [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
-    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
-    if [ -f "$tmp/symlinks.before" ]; then
-	new=$(LC_ALL=C comm -z -13 "$tmp/symlinks.before" \
-		     <(outside_symlinks "$work_path" | LC_ALL=C sort -z) |
-		  tr '\0' '\n')
-	if [ -n "$new" ]; then
-	    {
-		echo "$(date '+%F %T') New symlinks out of $work_path (don't follow them blindly):"
-		sed 's/^/  /' <<<"$new"
-	    } | tee -a "$HOME/AI/warnings.log" >&2
-	fi
-    fi
-    rm -rf -- "$tmp"
-}
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-mkfifo "$tmp/info" "$tmp/block" || exit 1
-# slirp4netns provides a DNS forwarder at 10.0.2.3.
-printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
-
-getent passwd "$(id -u)" >"$tmp/passwd"
-getent group "$(id -g)" >"$tmp/group"
-printf 'passwd: files\ngroup: files\nhosts: files dns\n' >"$tmp/nsswitch.conf"
-
-if [ -n "$ssh" ]; then
-    # A private agent holding only the AI's key; it dies with the script.
-    agent_sock="$tmp/agent.sock"
-    agent_pid=$(ssh-agent -s -a "$agent_sock" |
-		    sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
-    [ -n "$agent_pid" ] || die "--ssh: could not start ssh-agent."
-    SSH_AUTH_SOCK=$agent_sock ssh-add -q "$AI_SSH_KEY" </dev/tty ||
-	die "--ssh: could not load $AI_SSH_KEY."
-fi
-
 # --- Helpers ------------------------------------------------------------
 
 # Host-side Git: never run hooks or the fsmonitor.
@@ -270,6 +222,54 @@ protect_repos() {
 	)
     done
 }
+
+# --- Temporary files (removed on exit) ----------------------------------
+
+tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
+# `slirp` will hold (see below) the process ID of the background job
+# that runs slirp4netns, so the EXIT trap knows what to kill.
+slirp=
+agent_pid=
+
+cleanup() {
+    local new
+    [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
+    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
+    if [ -f "$tmp/symlinks.before" ]; then
+	new=$(LC_ALL=C comm -z -13 "$tmp/symlinks.before" \
+		     <(outside_symlinks "$work_path" | LC_ALL=C sort -z) |
+		  tr '\0' '\n')
+	if [ -n "$new" ]; then
+	    {
+		echo "$(date '+%F %T') New symlinks out of $work_path (don't follow them blindly):"
+		sed 's/^/  /' <<<"$new"
+	    } | tee -a "$HOME/AI/warnings.log" >&2
+	fi
+    fi
+    rm -rf -- "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkfifo "$tmp/info" "$tmp/block" || exit 1
+# slirp4netns provides a DNS forwarder at 10.0.2.3.
+printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
+
+getent passwd "$(id -u)" >"$tmp/passwd"
+getent group "$(id -g)" >"$tmp/group"
+printf 'passwd: files\ngroup: files\nhosts: files dns\n' >"$tmp/nsswitch.conf"
+
+if [ -n "$ssh" ]; then
+    # A private agent holding only the AI's key; it dies with the script.
+    agent_sock="$tmp/agent.sock"
+    agent_pid=$(ssh-agent -s -a "$agent_sock" |
+		    sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
+    [ -n "$agent_pid" ] || die "--ssh: could not start ssh-agent."
+    SSH_AUTH_SOCK=$agent_sock ssh-add -q "$AI_SSH_KEY" </dev/tty ||
+	die "--ssh: could not load $AI_SSH_KEY."
+fi
 
 # --- Sandbox ------------------------------------------------------------
 
