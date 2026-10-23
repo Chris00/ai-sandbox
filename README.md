@@ -318,14 +318,20 @@ untrusted code harmless.
 
 - **Exfiltration.** Whatever the sandbox can read can be sent to the
   internet: the work directory, `~/AI/home` (including the agent's own
-  API key) and your real `.git` (check that your remote URLs contain no
-  tokens).
+  API key) and your real `.git` under `/upstream` (check that your
+  remote URLs in `.git/config` contain no tokens).
 - **Code you run later.** The agent's changes land in your working
   tree. Review them before running the code, its build files or its CI
   configuration on the host.
+- `~/AI/home` and `~/AI/work` are AI-controlled. Treat them like the
+  work tree on the host. The exit check doesn’t scan them.
 - **The kernel.** All sandboxing relies on the Linux kernel, and a
   kernel bug can break it. The seccomp filter makes much of the kernel
   unreachable, but not all of it. Keep your system updated.
+- **Terminal escape sequences.** The sandbox writes to your real
+  terminal. Some terminals let a program set your clipboard (OSC 52),
+  so a paste could contain something you didn’t copy. Disable
+  clipboard writes in your terminal’s settings if it allows them.
 - **Disk space.** It isn't limited. `~/AI` and the work directory share
   your disk. Put `~/AI` on a separate file system, or use quotas, if
   that matters.
