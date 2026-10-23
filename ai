@@ -172,11 +172,12 @@ inner_mounts() {
     done
 }
 
-# Unix sockets in $1.  They work across namespaces: the sandbox could
-# talk to the host program listening on one, bypassing the firewall.
-# The .git directories are skipped: protect_repos hides them.
+# Unix sockets or named pipes in $1.  They work across namespaces: the
+# sandbox could talk to the host program listening on one, bypassing
+# the firewall.  The .git directories are skipped: protect_repos hides
+# them.
 inner_sockets() {
-    find "$1" -name .git -prune -o -type s -print
+    find "$1" -name .git -prune -o \( -type s -o -type p \) -print
 }
 
 # Symlinks in $1 resolving outside it, as NUL-separated "link → target".
@@ -519,7 +520,7 @@ if [ -n "$work_path" ]; then
     fi
     sockets=$(inner_sockets "$work_path")
     if [ -n "$sockets" ]; then
-	echo "Unix sockets in the work dir (the sandbox could talk to the programs behind them):" >&2
+	echo "Unix sockets or named pipes in the work dir (the sandbox could talk to the programs behind them):" >&2
 	sed 's/^/  /' <<<"$sockets" >&2
 	confirm "Continue anyway?" || exit 1
     fi
