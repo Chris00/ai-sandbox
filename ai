@@ -57,6 +57,11 @@ TRIGGERS=(
     .venv venv                          # activating runs their scripts
 )
 
+# List of destination constraints of the form ‘[user@]dest-hostname’
+# for the $AI_SSH_KEY.  An empty list means that it is unrestricted
+# (it can be used anywhere it's accepted).
+AI_SSH_HOSTS=(github.com gitlab.com)
+
 die() {
     echo "ai: $*" >&2
     exit 1
@@ -403,8 +408,15 @@ if [ -n "$ssh" ]; then
     agent_pid=$(ssh-agent -s -a "$agent_sock" 9>&- |
 		    sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
     [ -n "$agent_pid" ] || die "--ssh: could not start ssh-agent."
-    SSH_AUTH_SOCK=$agent_sock ssh-add -q "$AI_SSH_KEY" </dev/tty ||
+
+    host_opts=()
+    for h in "${AI_SSH_HOSTS[@]}"; do
+	host_opts+=(-h "$h")
+    done
+    SSH_AUTH_SOCK=$agent_sock \
+	ssh-add -q "${host_opts[@]}" "$AI_SSH_KEY" </dev/tty ||
 	die "--ssh: could not load $AI_SSH_KEY."
+    unset host_opts
 fi
 
 # --- Sandbox ------------------------------------------------------------
