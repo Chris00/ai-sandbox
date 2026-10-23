@@ -218,7 +218,7 @@ fi
 # a clone in $GIT_BACKUP, and show the real one read-only under
 # /upstream.  Modify $args to bind the copy (RW) and the upstream (RO).
 #
-# DIR must the the `realpath`.
+# DIR must be the `realpath`.
 protect_repos() {
     local dir=$1 f g repo rel_home copy upstream hooks
     local -a links repos
@@ -309,7 +309,7 @@ protect_repos() {
 # dir, so an entry is active exactly as long as its session runs; the
 # global lock makes checking and registering atomic.
 #
-# DIR must the the `realpath`.
+# DIR must be the `realpath`.
 lock_work_path() {
     local dir=$1 f other
     mkdir -p -- "$LOCKDIR" || exit 1
