@@ -90,8 +90,12 @@ if [ -n "$work_path" ]; then
 	    die "Refusing to expose your whole home directory ($work_path)." ;;
     esac
     case $work_path/ in
+	"$HOME"/.*)
+	    die "Refusing to expose configuration files ($work_path)." ;;
 	"$HOME/AI"/*)
 	    die "Refusing to expose the sandbox's own files ($work_path)." ;;
+	"$HOME/Personal/"/*)
+	    die "Refusing to expose your personal files ($work_path)." ;;
     esac
 fi
 
