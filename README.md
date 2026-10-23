@@ -58,7 +58,7 @@ The script also checks the host side, before and after each session:
 - `nftables` (`nft`), with the `nf_tables` kernel module loaded
 - GNU coreutils and findutils, `awk`, Git
 - Python 3 with libseccomp's bindings (`python3-seccomp` on Debian
-  and Ubuntu, `python3-libseccomp` on Fedora)
+  and Ubuntu, `libseccomp-python` on Fedora)
 - for `--ssh`: OpenSSH ≥ 8.9 (destination-restricted keys)
 
 On Debian or Ubuntu:
@@ -305,11 +305,10 @@ Without a systemd user session, `ai` runs without limits and says so.
 
 The paths are set at the top of the script.
 
-Everything under `~/AI` is controlled by the agent. On the host, treat
-it like a download from an unknown source: review files before opening
-them in an editor, entering the directories with a Git-aware prompt or
-running commands there.
-
+`~/AI/home` and `~/AI/work` are controlled by the agent. On the host,
+treat them like a download from an unknown source: review files before
+opening them in an editor, entering the directories with a Git-aware
+prompt or running commands there.
 
 ## Limitations
 
@@ -323,15 +322,18 @@ untrusted code harmless.
 - **Code you run later.** The agent's changes land in your working
   tree. Review them before running the code, its build files or its CI
   configuration on the host.
-- `~/AI/home` and `~/AI/work` are AI-controlled. Treat them like the
-  work tree on the host. The exit check doesn’t scan them.
+- **The agent's own directories.** `~/AI/home` and `~/AI/work` are
+  controlled by the agent, and the exit check doesn't scan them. On the
+  host, treat them like the work tree (see [Files](#files)).
 - **The kernel.** All sandboxing relies on the Linux kernel, and a
   kernel bug can break it. The seccomp filter makes much of the kernel
   unreachable, but not all of it. Keep your system updated.
 - **Terminal escape sequences.** The sandbox writes to your real
-  terminal. Some terminals let a program set your clipboard (OSC 52),
-  so a paste could contain something you didn’t copy. Disable
-  clipboard writes in your terminal’s settings if it allows them.
+  terminal, and no filter can tell harmless output from escape
+  sequences. Some terminals let a program set your clipboard (OSC 52),
+  so a paste could contain something you didn't copy. Terminals based
+  on VTE (GNOME Terminal, Ptyxis) ignore OSC 52; in others, disable
+  clipboard writes in the settings if possible.
 - **Disk space.** It isn't limited. `~/AI` and the work directory share
   your disk. Put `~/AI` on a separate file system, or use quotas, if
   that matters.
