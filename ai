@@ -204,6 +204,8 @@ protect_repos() {
 	    /usr/bin/git config --file "$g/config" remote.ai.url "$copy"
 	    /usr/bin/git config --file "$g/config" remote.ai.fetch \
 			 '+refs/heads/*:refs/remotes/ai/*'
+	    /usr/bin/git config --file "$g/config" remote.ai.tagOpt --no-tags
+	    /usr/bin/git config --file "$g/config" fetch.fsckObjects true
 	fi
 
 	args+=(
