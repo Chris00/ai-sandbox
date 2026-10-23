@@ -78,8 +78,8 @@ nsenter --help | grep -q -- --user-parent ||
     die "nsenter is too old, it does not support '--user-parent'."
 command -v lsns >/dev/null && command -v findmnt >/dev/null ||
     die "lsns or findmnt is missing (e.g. 'apt install util-linux')."
-command -v gawk >/dev/null ||
-    die "gawk is not installed."
+command -v awk >/dev/null ||
+    die "awk is not installed (e.g. 'apt install mawk')."
 
 if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
     die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
@@ -128,7 +128,7 @@ confirm() {    # confirm QUESTION: true if the user answers yes
 # skipped: protect_repos hides them from the sandbox.
 outside_hardlinks() {
     find "$1" -name .git -prune -o -type f -links +1 -printf '%D:%i %n %p\0' |
-	gawk 'BEGIN { RS = "\0" }
+	awk 'BEGIN { RS = "\0" }
 	      { k = $1; n[k] = $2; c[k]++
 		if (!(k in p)) p[k] = substr($0, length($1) + length($2) + 3) }
 	      END { for (k in c) if (c[k] < n[k]) print p[k] }'
