@@ -22,6 +22,7 @@
 
 AIHOME="$HOME/AI/home"
 GIT_BACKUP="$HOME/AI/work"
+AI_SSH_KEY="$HOME/.ssh/id_ed25519_ai"
 
 die() {
     echo "ai: $*" >&2
@@ -76,8 +77,8 @@ command -v nsenter >/dev/null ||
 nsenter --help | grep -q -- --user-parent ||
     die "nsenter is too old, it does not support '--user-parent'."
 
-if [ -n "$ssh" ] && [ ! -S "$SSH_AUTH_SOCK" ]; then
-    die "--ssh: no SSH agent socket found."
+if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
+    die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
 fi
 
 if [ -n "$work_path" ]; then
@@ -100,7 +101,10 @@ tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
 # `slirp` will hold (see below) the process ID of the background job
 # that runs slirp4netns, so the EXIT trap knows what to kill.
 slirp=
-trap '[ -n "$slirp" ] && kill "$slirp" 2>/dev/null; rm -rf -- "$tmp"' EXIT
+agent_pid=
+trap '[ -n "$slirp" ] && kill "$slirp" 2>/dev/null
+      [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
+      rm -rf -- "$tmp"' EXIT
 mkfifo "$tmp/info" "$tmp/block" || exit 1
 # slirp4netns provides a DNS forwarder at 10.0.2.3.
 printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
@@ -108,6 +112,16 @@ printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
 getent passwd "$(id -u)" >"$tmp/passwd"
 getent group "$(id -g)" >"$tmp/group"
 printf 'passwd: files\ngroup: files\nhosts: files dns\n' >"$tmp/nsswitch.conf"
+
+if [ -n "$ssh" ]; then
+    # A private agent holding only the AI's key; it dies with the script.
+    agent_sock="$tmp/agent.sock"
+    agent_pid=$(ssh-agent -s -a "$agent_sock" |
+		    sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
+    [ -n "$agent_pid" ] || die "--ssh: could not start ssh-agent."
+    SSH_AUTH_SOCK=$agent_sock ssh-add -q "$AI_SSH_KEY" </dev/tty ||
+	die "--ssh: could not load $AI_SSH_KEY."
+fi
 
 # --- Helpers ------------------------------------------------------------
 
@@ -231,12 +245,10 @@ args=(
 )
 
 if [ -n "$ssh" ]; then
-    # Only the agent socket itself: its directory may hold other
-    # sockets, such as the D-Bus session bus.
     args+=(
 	--ro-bind-try "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts"
-	--bind "$SSH_AUTH_SOCK" "$SSH_AUTH_SOCK"
-	--setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"
+	--bind "$agent_sock" /run/ssh-agent.sock
+	--setenv SSH_AUTH_SOCK /run/ssh-agent.sock
     )
 fi
 
