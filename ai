@@ -253,6 +253,15 @@ protect_repos() {
 
 	printf 'Git %s%s%s → %s\n' "$red" "$(rel_to_pwd "$repo")" "$normal" "$copy"
 
+	# git config writes through symlinks and hard links: only
+	# touch a regular file with no other name.
+	if [ -e "$g/config" ] || [ -L "$g/config" ]; then
+	    if [ -L "$g/config" ] || [ ! -f "$g/config" ] ||
+		   [ "$(stat -c %h -- "$g/config")" -ne 1 ]; then
+		die "$g/config is not a plain file: not touching $repo."
+	    fi
+	fi
+
 	# Hooks kept in the working tree (e.g. Husky's ".husky") are
 	# writable by the sandbox and run at your next commit.
 	hooks=$(/usr/bin/git config --file "$g/config" core.hooksPath)
