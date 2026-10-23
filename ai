@@ -40,7 +40,6 @@ table inet ai {
 }'
 
 LOCKDIR="$HOME/AI/locks"
-mkdir -p -- "$LOCKDIR" || exit 1
 
 # Files and directories that make tools on the host run code, often
 # just by entering the directory or opening it in an editor.
@@ -313,6 +312,7 @@ protect_repos() {
 # DIR must the the `realpath`.
 lock_work_path() {
     local dir=$1 f other
+    mkdir -p -- "$LOCKDIR" || exit 1
     exec 8>"$LOCKDIR/global.lock"
     flock 8 || die "Cannot lock $LOCKDIR."
     for f in "$LOCKDIR"/*.session; do
