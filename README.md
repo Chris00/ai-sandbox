@@ -35,7 +35,9 @@ The script also checks the host side, before and after each session:
 
 - **At startup**, it asks before going on if the work directory contains
   files hard-linked from elsewhere, or other file systems mounted inside it.
-  Both would let the sandbox write outside the work directory.
+  Both would let the sandbox write outside the work directory. It also
+  asks if the work directory contains Unix sockets: the sandbox could
+  talk to the program behind a socket, bypassing the network firewall.
 - **At exit**, it reports new symlinks pointing out of the work
   directory, and new or changed files that make tools on the host run
   code: `.envrc`, `.vscode/`, `.dir-locals.el`, `.npmrc`, `.cargo/`,
