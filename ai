@@ -40,6 +40,7 @@ table inet ai {
 }'
 
 LOCKDIR="$HOME/AI/locks"
+mkdir -p -- "$LOCKDIR" || exit 1
 
 die() {
     echo "ai: $*" >&2
@@ -121,11 +122,7 @@ if [ -n "$work_path" ]; then
 	    die "Refusing to expose your personal files ($work_path)." ;;
     esac
 
-    mkdir -p -- "$LOCKDIR" || exit 1
-    # Held until the script exits: the kernel releases the lock with
-    # the file descriptor, whatever the reason the script ends.
-    exec 9>"$LOCKDIR/$(printf %s "$work_path" | sha256sum | cut -c1-16).lock"
-    flock -n 9 || die "Another session is using $work_path. Exiting."
+    lock_work_path "$work_path"
 fi
 
 # --- Helpers ------------------------------------------------------------
@@ -312,6 +309,40 @@ protect_repos() {
 	    --ro-bind "$g" "$upstream"
 	)
     done
+}
+
+# lock_work_path DIR: refuse to start when another session's work dir
+# is DIR, contains it or is inside it; otherwise register DIR.  The
+# lock stays held on file descriptor 9 until the script exits.
+# Each session holds a lock on a file in $LOCKDIR containing its work
+# dir, so an entry is active exactly as long as its session runs; the
+# global lock makes checking and registering atomic.
+#
+# DIR must the the `realpath`.
+lock_work_path() {
+    local dir=$1 f other
+    exec 8>"$LOCKDIR/global.lock"
+    flock 8 || die "Cannot lock $LOCKDIR."
+    for f in "$LOCKDIR"/*.session; do
+	[ -e "$f" ] || continue
+	if flock -n "$f" true; then
+	    rm -f -- "$f"          # nobody holds it: a finished session
+	    continue
+	fi
+	other=$(<"$f")
+	case $dir/ in "$other"/*)
+	    die "Another session works in $other, which contains $dir." ;;
+	esac
+	case $other/ in "$dir"/*)
+	    die "Another session works in $other, inside $dir." ;;
+	esac
+    done
+    # Held until the script exits: the kernel releases the lock with
+    # the file descriptor, whatever the reason the script ends.
+    exec 9>"$LOCKDIR/$(printf %s "$dir" | sha256sum | cut -c1-16).session"
+    flock -n 9 || die "Another session is using $dir."
+    printf '%s\n' "$dir" >&9
+    exec 8>&-                      # release the global lock
 }
 
 # --- Temporary files (removed on exit) ----------------------------------
