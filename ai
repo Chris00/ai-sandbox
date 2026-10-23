@@ -148,6 +148,20 @@ rel_to_pwd() {
     esac
 }
 
+# Where a .git symlink or gitfile ("gitdir: PATH") points to.
+git_link_target() {
+    local f=$1 target
+    if [ -L "$f" ]; then
+	realpath -m -- "$f"
+    else
+	target=$(sed -n '1s/^gitdir: //p' -- "$f")
+	case $target in
+	    /*) realpath -m -- "$target" ;;
+	    *)  realpath -m -- "${f%/.git}/$target" ;;
+	esac
+    fi
+}
+
 confirm() {    # confirm QUESTION: true if the user answers yes
     local answer
     read -r -p "$1 [y/N] " answer </dev/tty || return 1
@@ -237,13 +251,25 @@ protect_repos() {
     local dir=$1 f g repo rel_home copy upstream hooks
     local -a links repos
 
-    # Submodules and worktrees have a ".git" *file*: their Git data is
-    # elsewhere and not mounted, so Git will not work on them inside.
+    # .git files (submodules, worktrees) and symlinks: their Git data
+    # is elsewhere.  It stays hidden when it is outside the work dir or
+    # in a protected .git, but is exposed when it is anywhere else in
+    # the work dir.
     mapfile -d '' -t links < <(
-	find "$dir" -name .git \( -type d -prune -o -type f -print0 \)
+	find "$dir" -name .git \( -type d -prune -o \( -type f -o -type l \) -print0 \)
     )
     for f in "${links[@]}"; do
-	echo "Not handled (submodule or worktree): $(rel_to_pwd "${f%/.git}")" >&2
+	target=$(git_link_target "$f")
+	case $target in
+	    */.git|*/.git/*)
+		echo "Not handled (submodule or worktree): $(rel_to_pwd "${f%/.git}")" >&2 ;;
+	    "$dir"|"$dir"/*)
+		echo "$(rel_to_pwd "$f") points to $(rel_to_pwd "$target"), inside the work dir:" >&2
+		echo "  that repo's history, config and hooks are NOT protected." >&2
+		confirm "  Continue anyway?" || exit 1 ;;
+	    *)
+		echo "Not handled (Git data outside the work dir): $(rel_to_pwd "${f%/.git}")" >&2 ;;
+	esac
     done
 
     # Shallowest first, so that an enclosing repo is cloned before the
