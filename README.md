@@ -28,7 +28,8 @@ namespaces.
 | system                    | `/usr`, `/lib` and `/bin` read-only; a minimal `/etc`; private `/dev`, `/proc` and `/tmp` |
 | environment               | cleared: no tokens or session variables leak in                      |
 | network                   | internet only, through [slirp4netns](https://github.com/rootless-containers/slirp4netns); the host's localhost and the local network (printers, NAS, router…) are blocked by a firewall the agent can't change |
-| SSH keys                  | never exposed; with `--ssh`, a private agent offers one dedicated key |
+| SSH keys                  | never exposed; with `--ssh`, a private agent offers one dedicated key, usable only on the hosts you list |
+| kernel                    | the agent can't create user namespaces, which keeps kernel features normally reserved for root out of its reach |
 | CPU, memory, processes    | limited with a systemd scope (half the RAM and CPUs by default)      |
 
 The script also checks the host side, before and after each session:
@@ -50,11 +51,13 @@ The script also checks the host side, before and after each session:
 
 - Linux with unprivileged user namespaces, and a systemd user session
   for the resource limits
-- [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
+- [bubblewrap](https://github.com/containers/bubblewrap) ≥ 0.8
+  (`bwrap --disable-userns`)
 - [slirp4netns](https://github.com/rootless-containers/slirp4netns)
 - util-linux ≥ 2.39 (`nsenter --user-parent`, `lsns`, `findmnt`, `flock`)
 - `nftables` (`nft`), with the `nf_tables` kernel module loaded
 - GNU coreutils and findutils, `awk`, Git
+- for `--ssh`: OpenSSH ≥ 8.9 (destination-restricted keys)
 
 On Debian or Ubuntu:
 
@@ -100,6 +103,10 @@ sudo apt install bubblewrap slirp4netns util-linux nftables git
    ```sh
    ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_ai -C ai-agent
    ```
+
+   Then set `AI_SSH_HOSTS` at the top of the script to the hosts the
+   agent may use it on, and connect once to each of them from your
+   normal session so that they are in your `~/.ssh/known_hosts`.
 
 
 ## Usage
@@ -164,7 +171,19 @@ sandbox. The agent can use the key while the session runs, but can't
 copy it, and the agent stops with the session. Your `known_hosts` is
 available read-only.
 
-The key only limits the risk if servers limit what it may do:
+The agent only uses the key for the hosts listed in `AI_SSH_HOSTS`, at
+the top of the script (`github.com` and `gitlab.com` by default):
+
+```bash
+AI_SSH_HOSTS=(github.com gitlab.com git@codeberg.org)
+```
+
+Each entry is a host name, optionally with a user (`git@codeberg.org`).
+The agent recognizes a host by its key, so every listed host must be in
+your `~/.ssh/known_hosts`, or `ssh-add` reports an error. An
+empty list lets the key be used on any host that accepts it.
+
+The key still only limits the risk if servers limit what it may do:
 
 - **GitHub or GitLab:** use a separate account that is a collaborator
   only on the repositories the agent works on, or a deploy key per
