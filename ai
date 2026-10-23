@@ -183,16 +183,19 @@ else
     red= normal=
 fi
 
-# Hide the real .git of each repo under $work_path behind a clone in
-# $GIT_BACKUP, and show the real one read-only under /upstream.
+# protect_repos DIR: hide the real .git of each repo under DIR behind
+# a clone in $GIT_BACKUP, and show the real one read-only under
+# /upstream.  Modify $args to bind the copy (RW) and the upstream (RO).
+#
+# DIR must the the `realpath`.
 protect_repos() {
-    local f g repo rel_home copy upstream hooks
+    local dir=$1 f g repo rel_home copy upstream hooks
     local -a links repos
 
     # Submodules and worktrees have a ".git" *file*: their Git data is
     # elsewhere and not mounted, so Git will not work on them inside.
     mapfile -d '' -t links < <(
-	find "$work_path" -name .git \( -type d -prune -o -type f -print0 \)
+	find "$dir" -name .git \( -type d -prune -o -type f -print0 \)
     )
     for f in "${links[@]}"; do
 	echo "Not handled (submodule or worktree): $(rel_to_pwd "${f%/.git}")" >&2
@@ -201,7 +204,7 @@ protect_repos() {
     # Shallowest first, so that an enclosing repo is cloned before the
     # repos nested in it (Git refuses to clone into a non-empty dir).
     mapfile -d '' -t repos < <(
-	find "$work_path" -name .git -type d -prune -printf '%d\t%p\0' |
+	find "$dir" -name .git -type d -prune -printf '%d\t%p\0' |
 	    LC_ALL=C sort -z -n -s -k1,1 |
 	    cut -z -f2-
     )
@@ -262,7 +265,7 @@ protect_repos() {
 	fi
 
 	args+=(
-	    --bind "$copy/.git" "/work/${g#"$work_path"/}"
+	    --bind "$copy/.git" "/work/${g#"$dir"/}"
 	    --ro-bind "$g" "$upstream"
 	)
     done
@@ -473,7 +476,7 @@ if [ -n "$work_path" ]; then
 	# E.g. to experiment in a /tmp directory.
 	echo "$work_path is not under \$HOME: its Git repos are NOT protected." >&2
     else
-	protect_repos
+	protect_repos "$work_path"
     fi
 
     # Snapshots for the checks at exit, taken after protect_repos, whose
