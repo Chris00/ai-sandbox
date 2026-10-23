@@ -385,6 +385,9 @@ args=(
     --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache
     --ro-bind "$tmp/nsswitch.conf" /etc/nsswitch.conf
     --unshare-user
+    # Forbid using `unshare -U` to gain full capabilities in a fresh
+    # namespace.
+    --disable-userns
     --bind "$AIHOME/" "$HOME/"
     --setenv HOME "$HOME"
     --setenv USER "$USER"
