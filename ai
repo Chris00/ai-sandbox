@@ -67,6 +67,32 @@ die() {
     exit 1
 }
 
+# --- Resource limits ----------------------------------------------------
+#
+# The whole session (sandbox, slirp4netns, ssh-agent) runs in a systemd
+# scope with resource limits.  The defaults can be changed from the
+# environment, e.g. "AI_CPUS=2 ai -w proj".
+AI_MEMORY=${AI_MEMORY:-50%}             # of the RAM
+AI_SWAP=${AI_SWAP:-$(awk '/^SwapTotal:/ { print int($2 / 2) "K" }' /proc/meminfo)}
+AI_CPUS=${AI_CPUS:-$(( ($(nproc) + 1) / 2 ))}
+AI_TASKS=${AI_TASKS:-1024}              # processes and threads
+
+if [ -z "$AI_IN_SCOPE" ]; then
+    if systemctl --user show-environment >/dev/null 2>&1; then
+	AI_IN_SCOPE=1 exec systemd-run --user --scope --quiet \
+	    --description="AI sandbox" \
+	    -p MemoryMax="$AI_MEMORY" \
+	    -p MemorySwapMax="$AI_SWAP" \
+	    -p CPUQuota="$((AI_CPUS * 100))%" \
+	    -p CPUWeight=50 \
+	    -p IOWeight=50 \
+	    -p TasksMax="$AI_TASKS" \
+	    -p OOMPolicy=continue \
+	    -- "$(realpath -- "${BASH_SOURCE[0]}")" "$@"
+    fi
+    echo "ai: no systemd user session: running WITHOUT resource limits." >&2
+fi
+
 # --- Options ------------------------------------------------------------
 
 ssh=
