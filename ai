@@ -82,49 +82,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --- Checks -------------------------------------------------------------
-
-[ -d "$AIHOME" ] ||
-    die "Create the directory '$AIHOME' with minimal configuration files."
-[ -x /usr/bin/bwrap ] ||
-    die "bubblewrap is not installed (e.g. 'apt install bubblewrap')."
-command -v slirp4netns >/dev/null ||
-    die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
-command -v nsenter >/dev/null ||
-    die "nsenter is not installed (e.g. 'apt install util-linux')."
-nsenter --help | grep -q -- --user-parent ||
-    die "nsenter is too old, it does not support '--user-parent'."
-command -v lsns >/dev/null && command -v findmnt >/dev/null ||
-    die "lsns or findmnt is missing (e.g. 'apt install util-linux')."
-command -v awk >/dev/null ||
-    die "awk is not installed (e.g. 'apt install mawk')."
-NFT=$(PATH=$PATH:/usr/sbin:/sbin command -v nft) ||
-    die "nft is not installed (e.g. 'apt install nftables')."
-
-if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
-    die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
-fi
-
-if [ -n "$work_path" ]; then
-    if [ "$work_path" = / ]; then
-	die "Refusing to expose the whole file system."
-    fi
-    case $HOME/ in
-	"$work_path"/*)
-	    die "Refusing to expose your whole home directory ($work_path)." ;;
-    esac
-    case $work_path/ in
-	"$HOME"/.*)
-	    die "Refusing to expose configuration files ($work_path)." ;;
-	"$HOME/AI"/*)
-	    die "Refusing to expose the sandbox's own files ($work_path)." ;;
-	"$HOME/Personal"/*)
-	    die "Refusing to expose your personal files ($work_path)." ;;
-    esac
-
-    lock_work_path "$work_path"
-fi
-
 # --- Helpers ------------------------------------------------------------
 
 # Host-side Git: never run hooks or the fsmonitor.
@@ -344,6 +301,49 @@ lock_work_path() {
     printf '%s\n' "$dir" >&9
     exec 8>&-                      # release the global lock
 }
+
+# --- Checks -------------------------------------------------------------
+
+[ -d "$AIHOME" ] ||
+    die "Create the directory '$AIHOME' with minimal configuration files."
+[ -x /usr/bin/bwrap ] ||
+    die "bubblewrap is not installed (e.g. 'apt install bubblewrap')."
+command -v slirp4netns >/dev/null ||
+    die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
+command -v nsenter >/dev/null ||
+    die "nsenter is not installed (e.g. 'apt install util-linux')."
+nsenter --help | grep -q -- --user-parent ||
+    die "nsenter is too old, it does not support '--user-parent'."
+command -v lsns >/dev/null && command -v findmnt >/dev/null ||
+    die "lsns or findmnt is missing (e.g. 'apt install util-linux')."
+command -v awk >/dev/null ||
+    die "awk is not installed (e.g. 'apt install mawk')."
+NFT=$(PATH=$PATH:/usr/sbin:/sbin command -v nft) ||
+    die "nft is not installed (e.g. 'apt install nftables')."
+
+if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
+    die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
+fi
+
+if [ -n "$work_path" ]; then
+    if [ "$work_path" = / ]; then
+	die "Refusing to expose the whole file system."
+    fi
+    case $HOME/ in
+	"$work_path"/*)
+	    die "Refusing to expose your whole home directory ($work_path)." ;;
+    esac
+    case $work_path/ in
+	"$HOME"/.*)
+	    die "Refusing to expose configuration files ($work_path)." ;;
+	"$HOME/AI"/*)
+	    die "Refusing to expose the sandbox's own files ($work_path)." ;;
+	"$HOME/Personal"/*)
+	    die "Refusing to expose your personal files ($work_path)." ;;
+    esac
+
+    lock_work_path "$work_path"
+fi
 
 # --- Temporary files (removed on exit) ----------------------------------
 
