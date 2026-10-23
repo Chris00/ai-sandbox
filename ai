@@ -24,6 +24,21 @@ AIHOME="$HOME/AI/home"
 GIT_BACKUP="$HOME/AI/work"
 AI_SSH_KEY="$HOME/.ssh/id_ed25519_ai"
 
+# Firewall of the sandbox's network: no access to the local network.
+# 10.0.2.3 is slirp4netns's DNS forwarder; the rest of 10.0.0.0/8,
+# including the host behind 10.0.2.2, is blocked.
+NFT_RULES='
+table inet ai {
+    chain output {
+	type filter hook output priority 0; policy accept;
+	ip daddr 10.0.2.3 meta l4proto { tcp, udp } th dport 53 accept
+	ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16,
+		   172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4,
+		   240.0.0.0/4 } reject
+	ip6 daddr { fc00::/7, fe80::/10, ff00::/8 } reject
+    }
+}'
+
 die() {
     echo "ai: $*" >&2
     exit 1
@@ -80,6 +95,8 @@ command -v lsns >/dev/null && command -v findmnt >/dev/null ||
     die "lsns or findmnt is missing (e.g. 'apt install util-linux')."
 command -v awk >/dev/null ||
     die "awk is not installed (e.g. 'apt install mawk')."
+NFT=$(PATH=$PATH:/usr/sbin:/sbin command -v nft) ||
+    die "nft is not installed (e.g. 'apt install nftables')."
 
 if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
     die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
@@ -433,6 +450,12 @@ fi
 # it.  slirp4netns writes to the block pipe when ready, which releases
 # bwrap.
 (
+    fail() {
+	echo "ai: network setup failed: $*" >&2
+	# Otherwise bwrap waits on the block pipe forever.
+	[ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null
+	exit 1
+    }
     while IFS= read -r line; do
 	if [[ $line =~ \"child-pid\":\ *([0-9]+) ]]; then
 	    pid=${BASH_REMATCH[1]}
@@ -442,7 +465,7 @@ fi
     [ -n "$pid" ] || exit 1
     # The user namespace owning the sandbox's network namespace.  bwrap
     # later moves the sandbox into a namespace nested in it.
-    owner=$(lsns -t net -p "$pid" -n -o ONS) || exit 1
+    owner=$(lsns -t net -p "$pid" -n -o ONS) || fail "lsns"
     owner="user:[${owner//[[:space:]]/}]"
     for _ in {1..200}; do
 	[ "$(readlink "/proc/$pid/ns/user")" != "$owner" ] && break
@@ -453,6 +476,12 @@ fi
     else
 	userns=(--user)                  # not nested (yet)
     fi
+    # Firewall in the sandbox's network namespace, set as root of the
+    # namespace that owns it: the sandbox cannot change it.
+    nsenter --target "$pid" "${userns[@]}" --preserve-credentials \
+	    --net="/proc/$pid/ns/net" "$NFT" -f - <<<"$NFT_RULES" ||
+	fail "could not install the firewall rules"
+
     exec nsenter --target "$pid" "${userns[@]}" --preserve-credentials \
 	 slirp4netns --configure --mtu=65520 --disable-host-loopback \
 	 --enable-sandbox --enable-seccomp \
