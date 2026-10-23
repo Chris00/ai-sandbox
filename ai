@@ -76,6 +76,8 @@ command -v nsenter >/dev/null ||
     die "nsenter is not installed (e.g. 'apt install util-linux')."
 nsenter --help | grep -q -- --user-parent ||
     die "nsenter is too old, it does not support '--user-parent'."
+command -v gawk >/dev/null ||
+    die "gawk is not installed."
 
 if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
     die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
@@ -106,9 +108,29 @@ tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
 # that runs slirp4netns, so the EXIT trap knows what to kill.
 slirp=
 agent_pid=
-trap '[ -n "$slirp" ] && kill "$slirp" 2>/dev/null
-      [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
-      rm -rf -- "$tmp"' EXIT
+
+cleanup() {
+    local new
+    [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
+    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
+    if [ -f "$tmp/symlinks.before" ]; then
+	new=$(LC_ALL=C comm -z -13 "$tmp/symlinks.before" \
+		     <(outside_symlinks "$work_path" | LC_ALL=C sort -z) |
+		  tr '\0' '\n')
+	if [ -n "$new" ]; then
+	    {
+		echo "$(date '+%F %T') New symlinks out of $work_path (don't follow them blindly):"
+		sed 's/^/  /' <<<"$new"
+	    } | tee -a "$HOME/AI/warnings.log" >&2
+	fi
+    fi
+    rm -rf -- "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 mkfifo "$tmp/info" "$tmp/block" || exit 1
 # slirp4netns provides a DNS forwarder at 10.0.2.3.
 printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
@@ -140,6 +162,41 @@ rel_to_pwd() {
 	"$PWD"/*) echo "./${1#"$PWD"/}" ;;
 	*)        echo "$1" ;;  # not under the current directory
     esac
+}
+
+confirm() {    # confirm QUESTION: true if the user answers yes
+    local answer
+    read -r -p "$1 [y/N] " answer </dev/tty || return 1
+    [[ $answer == [yY]* ]]
+}
+
+# Files in $1 with a hard link outside it.  The .git directories are
+# skipped: protect_repos hides them from the sandbox.
+outside_hardlinks() {
+    find "$1" -name .git -prune -o -type f -links +1 -printf '%D:%i %n %p\0' |
+	gawk 'BEGIN { RS = "\0" }
+	      { k = $1; n[k] = $2; c[k]++
+		if (!(k in p)) p[k] = substr($0, length($1) + length($2) + 3) }
+	      END { for (k in c) if (c[k] < n[k]) print p[k] }'
+}
+
+# File systems mounted inside $1 (bwrap binds recursively).
+inner_mounts() {
+    local m
+    findmnt -rn -o TARGET | while IFS= read -r m; do
+	case $m in "$1"/*) echo "$m" ;; esac
+    done
+}
+
+# Symlinks in $1 resolving outside it, as NUL-separated "link → target".
+outside_symlinks() {
+    local f
+    while IFS= read -r -d '' f; do
+	case $(realpath -m -- "$f") in
+	    "$1"|"$1"/*) ;;
+	    *) printf '%s → %s\0' "$(rel_to_pwd "$f")" "$(readlink -- "$f")" ;;
+	esac
+    done < <(find "$1" -name .git -prune -o -type l -print0)
 }
 
 if [ -t 1 ]; then
@@ -184,9 +241,8 @@ protect_repos() {
 	    # No copy yet: either a repo of yours seen for the first time,
 	    # or one the AI created in the shared tree in an earlier
 	    # session, whose configuration would be untrusted.
-	    read -r -p "  New repo: did you create it yourself? [y/N] " answer \
-		 </dev/tty
-	    [[ $answer == [yY]* ]] || die "Not trusting $repo."
+	    confirm "  New repo: did you create it yourself?" ||
+		die "Not trusting $repo."
 
 	    mkdir -p -- "$(dirname -- "$copy")" || exit 1
 	    # Cloning reads the source through upload-pack, which is
@@ -259,6 +315,20 @@ if [ -n "$ssh" ]; then
 fi
 
 if [ -n "$work_path" ]; then
+    links=$(outside_hardlinks "$work_path")
+    if [ -n "$links" ]; then
+	echo "Hard-linked outside the work dir (the sandbox could modify these files):" >&2
+	sed 's/^/  /' <<<"$links" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+    mounts=$(inner_mounts "$work_path")
+    if [ -n "$mounts" ]; then
+	echo "File systems mounted inside the work dir (exposed too):" >&2
+	sed 's/^/  /' <<<"$mounts" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+    outside_symlinks "$work_path" | LC_ALL=C sort -z >"$tmp/symlinks.before"
+
     # Mount outside $HOME: / is a tmpfs, so no mount point is left
     # behind in $AIHOME.
     args+=(
