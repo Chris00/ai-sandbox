@@ -76,6 +76,8 @@ AI_MEMORY=${AI_MEMORY:-50%}             # of the RAM
 AI_SWAP=${AI_SWAP:-$(awk '/^SwapTotal:/ { print int($2 / 2) "K" }' /proc/meminfo)}
 AI_CPUS=${AI_CPUS:-$(( ($(nproc) + 1) / 2 ))}
 AI_TASKS=${AI_TASKS:-1024}              # processes and threads
+[[ $AI_CPUS =~ ^[1-9][0-9]*$ && $AI_TASKS =~ ^[1-9][0-9]*$ ]] ||
+    die "AI_CPUS and AI_TASKS must be positive integers."
 
 if [ -z "$AI_IN_SCOPE" ]; then
     if systemctl --user show-environment >/dev/null 2>&1; then
