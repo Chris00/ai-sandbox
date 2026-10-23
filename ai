@@ -395,6 +395,8 @@ command -v awk >/dev/null ||
     die "awk is not installed (e.g. 'apt install mawk')."
 NFT=$(PATH=$PATH:/usr/sbin:/sbin command -v nft) ||
     die "nft is not installed (e.g. 'apt install nftables')."
+python3 -c 'import seccomp' 2>/dev/null ||
+    die "libseccomp's Python bindings are missing (e.g. 'apt install python3-seccomp')."
 
 if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
     die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
@@ -467,6 +469,48 @@ printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
 getent passwd "$(id -u)" >"$tmp/passwd"
 getent group "$(id -g)" >"$tmp/group"
 printf 'passwd: files\ngroup: files\nhosts: files dns\n' >"$tmp/nsswitch.conf"
+
+# A seccomp filter for the sandbox: block kernel interfaces programs
+# can do without, and that have a long record of exploited bugs.  The
+# filter only covers 64-bit system calls: 32-bit ones (i386, x32) kill
+# the process.
+python3 -I - "$tmp/seccomp.bpf" <<'EOF' || die "Could not build the seccomp filter."
+import errno, sys
+import seccomp
+
+f = seccomp.SyscallFilter(seccomp.ALLOW)
+
+def deny(err, *names, args=()):
+    for name in names:
+        try:
+            f.add_rule(seccomp.ERRNO(err), name, *args)
+        except (OSError, RuntimeError, ValueError):
+            pass                        # not on this architecture
+
+# Programs fall back to classic I/O when io_uring is missing.
+deny(errno.ENOSYS, "io_uring_setup", "io_uring_enter", "io_uring_register")
+deny(errno.EPERM, "bpf", "userfaultfd", "perf_event_open",
+     "keyctl", "add_key", "request_key")
+# Refused anyway without privileges: no need to reach that code.
+deny(errno.EPERM, "mount", "umount2", "pivot_root", "mount_setattr",
+     "move_mount", "open_tree", "fsopen", "fsconfig", "fsmount", "fspick")
+# Typing into the terminal (TIOCSTI) or the Linux console (TIOCLINUX).
+for request in (0x5412, 0x541C):
+    deny(errno.EPERM, "ioctl",
+         args=(seccomp.Arg(1, seccomp.MASKED_EQ, 0xFFFFFFFF, request),))
+# Socket families: only Unix, IPv4, IPv6 and netlink (name resolution).
+# The kernel only reads the low 32 bits of the family, hence the final
+# rule: it also catches values with high bits set.
+allowed = {1, 2, 10, 16}
+for family in range(64):
+    if family not in allowed:
+        deny(errno.EAFNOSUPPORT, "socket",
+             args=(seccomp.Arg(0, seccomp.EQ, family),))
+deny(errno.EAFNOSUPPORT, "socket", args=(seccomp.Arg(0, seccomp.GE, 64),))
+
+with open(sys.argv[1], "wb") as out:
+    f.export_bpf(out)
+EOF
 
 if [ -n "$ssh" ]; then
     # A private agent holding only the AI's key; it dies with the script.
@@ -634,6 +678,6 @@ slirp=$!
 
 # The block pipe is opened read-write: read-only would wait for a
 # writer, and slirp4netns only opens it once bwrap has started.
-/usr/bin/bwrap --info-fd 3 --block-fd 4 "${args[@]}" "${cmd[@]}" \
-	       3>"$tmp/info" 4<>"$tmp/block" 9>&-
+/usr/bin/bwrap --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" "${cmd[@]}" \
+	       3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 9>&-
 exit $?

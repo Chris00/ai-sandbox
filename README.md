@@ -29,7 +29,7 @@ namespaces.
 | environment               | cleared: no tokens or session variables leak in                      |
 | network                   | internet only, through [slirp4netns](https://github.com/rootless-containers/slirp4netns); the host's localhost and the local network (printers, NAS, router…) are blocked by a firewall the agent can't change |
 | SSH keys                  | never exposed; with `--ssh`, a private agent offers one dedicated key, usable only on the hosts you list |
-| kernel                    | the agent can't create user namespaces, which keeps kernel features normally reserved for root out of its reach |
+| kernel                    | the agent can't create user namespaces, which keeps kernel features normally reserved for root out of its reach; a seccomp filter blocks rarely needed kernel interfaces with a record of exploited bugs (see [System calls](#system-calls)) |
 | CPU, memory, processes    | limited with a systemd scope (half the RAM and CPUs by default)      |
 
 The script also checks the host side, before and after each session:
@@ -57,12 +57,14 @@ The script also checks the host side, before and after each session:
 - util-linux ≥ 2.39 (`nsenter --user-parent`, `lsns`, `findmnt`, `flock`)
 - `nftables` (`nft`), with the `nf_tables` kernel module loaded
 - GNU coreutils and findutils, `awk`, Git
+- Python 3 with libseccomp's bindings (`python3-seccomp` on Debian
+  and Ubuntu, `python3-libseccomp` on Fedora)
 - for `--ssh`: OpenSSH ≥ 8.9 (destination-restricted keys)
 
 On Debian or Ubuntu:
 
 ```sh
-sudo apt install bubblewrap slirp4netns util-linux nftables git
+sudo apt install bubblewrap slirp4netns util-linux nftables git python3-seccomp
 ```
 
 
@@ -218,6 +220,37 @@ curl -sI https://example.com        # works
 have.
 
 
+## System calls
+
+Everything in the sandbox runs under a seccomp filter, built at each
+launch. It blocks kernel interfaces that ordinary programs can do
+without, and that have a long record of exploited bugs:
+
+| Blocked                                       | Error          |
+|-----------------------------------------------|----------------|
+| `io_uring` (programs fall back to classic I/O) | `ENOSYS`      |
+| `bpf`, `userfaultfd`, `perf_event_open`       | `EPERM`        |
+| kernel keyrings (`keyctl`, `add_key`, `request_key`) | `EPERM` |
+| mounting (refused anyway without privileges)  | `EPERM`        |
+| typing into the terminal (`TIOCSTI`, `TIOCLINUX`) | `EPERM`    |
+| socket families other than Unix, IPv4, IPv6 and netlink | `EAFNOSUPPORT` |
+
+32-bit system calls (i386 and x32) kill the process, so that they can't
+be used to get around the filter.
+
+As a result, profilers based on `perf_event_open` and 32-bit programs
+don't work in the sandbox. If a tool needs one of the blocked calls,
+remove it from the list in the script.
+
+To check that the filter is active, from inside the sandbox:
+
+```sh
+grep Seccomp /proc/self/status    # "Seccomp: 2"
+python3 -c 'import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW)'
+# OSError: [Errno 97] Address family not supported by protocol
+```
+
+
 ## Resource limits
 
 `ai` restarts itself in a systemd user scope, so the whole session (the
@@ -291,7 +324,8 @@ untrusted code harmless.
   tree. Review them before running the code, its build files or its CI
   configuration on the host.
 - **The kernel.** All sandboxing relies on the Linux kernel, and a
-  kernel bug can break it. Keep your system updated.
+  kernel bug can break it. The seccomp filter makes much of the kernel
+  unreachable, but not all of it. Keep your system updated.
 - **Disk space.** It isn't limited. `~/AI` and the work directory share
   your disk. Put `~/AI` on a separate file system, or use quotas, if
   that matters.
