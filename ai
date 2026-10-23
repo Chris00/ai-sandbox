@@ -365,7 +365,7 @@ printf 'passwd: files\ngroup: files\nhosts: files dns\n' >"$tmp/nsswitch.conf"
 if [ -n "$ssh" ]; then
     # A private agent holding only the AI's key; it dies with the script.
     agent_sock="$tmp/agent.sock"
-    agent_pid=$(ssh-agent -s -a "$agent_sock" |
+    agent_pid=$(ssh-agent -s -a "$agent_sock" 9>&- |
 		    sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
     [ -n "$agent_pid" ] || die "--ssh: could not start ssh-agent."
     SSH_AUTH_SOCK=$agent_sock ssh-add -q "$AI_SSH_KEY" </dev/tty ||
@@ -508,7 +508,7 @@ fi
 	 --ready-fd=3 --netns-type=path "/proc/$pid/ns/net" tap0 \
 	 3>"$tmp/block" >/dev/null \
 	 2> >(grep --line-buffered -v -E '^(sent tapfd=[0-9]+ for tap0|received tapfd=[0-9]+)$' >&2)
-) &
+) 9>&- &
 slirp=$!
 
 # --- Run ----------------------------------------------------------------
@@ -516,5 +516,5 @@ slirp=$!
 # The block pipe is opened read-write: read-only would wait for a
 # writer, and slirp4netns only opens it once bwrap has started.
 /usr/bin/bwrap --info-fd 3 --block-fd 4 "${args[@]}" "${cmd[@]}" \
-	       3>"$tmp/info" 4<>"$tmp/block"
+	       3>"$tmp/info" 4<>"$tmp/block" 9>&-
 exit $?
