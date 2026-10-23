@@ -42,6 +42,21 @@ table inet ai {
 LOCKDIR="$HOME/AI/locks"
 mkdir -p -- "$LOCKDIR" || exit 1
 
+# Files and directories that make tools on the host run code, often
+# just by entering the directory or opening it in an editor.
+TRIGGERS=(
+    .git                                # a new repo: its config runs on `git status`
+    .envrc .direnv                      # direnv
+    .dir-locals.el .dir-locals-2.el     # Emacs
+    .vscode .idea .devcontainer         # editors and IDEs
+    .npmrc .yarnrc .yarnrc.yml .pnpmfile.cjs  # npm, Yarn, pnpm
+    .cargo                              # Cargo (runners, wrappers)
+    .mise.toml mise.toml .tool-versions # mise, asdf
+    .husky .pre-commit-config.yaml      # Git hooks kept in the tree
+    .gitmodules .gitattributes
+    .venv venv                          # activating runs their scripts
+)
+
 die() {
     echo "ai: $*" >&2
     exit 1
@@ -132,20 +147,6 @@ outside_symlinks() {
     done < <(find "$1" -name .git -prune -o -type l -print0)
 }
 
-# Files and directories that make tools on the host run code, often
-# just by entering the directory or opening it in an editor.
-TRIGGERS=(
-    .git                                # a new repo: its config runs on `git status`
-    .envrc .direnv                      # direnv
-    .dir-locals.el .dir-locals-2.el     # Emacs
-    .vscode .idea .devcontainer         # editors and IDEs
-    .npmrc .yarnrc .yarnrc.yml .pnpmfile.cjs  # npm, Yarn, pnpm
-    .cargo                              # Cargo (runners, wrappers)
-    .mise.toml mise.toml .tool-versions # mise, asdf
-    .husky .pre-commit-config.yaml      # Git hooks kept in the tree
-    .gitmodules .gitattributes
-    .venv venv                          # activating runs their scripts
-)
 trigger_expr=()
 for t in "${TRIGGERS[@]}"; do
     trigger_expr+=(-o -name "$t")
