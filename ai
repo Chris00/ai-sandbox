@@ -76,6 +76,8 @@ command -v nsenter >/dev/null ||
     die "nsenter is not installed (e.g. 'apt install util-linux')."
 nsenter --help | grep -q -- --user-parent ||
     die "nsenter is too old, it does not support '--user-parent'."
+command -v lsns >/dev/null && command -v findmnt >/dev/null ||
+    die "lsns or findmnt is missing (e.g. 'apt install util-linux')."
 command -v gawk >/dev/null ||
     die "gawk is not installed."
 
@@ -151,6 +153,51 @@ outside_symlinks() {
     done < <(find "$1" -name .git -prune -o -type l -print0)
 }
 
+# Files and directories that make tools on the host run code, often
+# just by entering the directory or opening it in an editor.
+TRIGGERS=(
+    .git                                # a new repo: its config runs on `git status`
+    .envrc .direnv                      # direnv
+    .dir-locals.el .dir-locals-2.el     # Emacs
+    .vscode .idea .devcontainer         # editors and IDEs
+    .npmrc .yarnrc .yarnrc.yml .pnpmfile.cjs  # npm, Yarn, pnpm
+    .cargo                              # Cargo (runners, wrappers)
+    .mise.toml mise.toml .tool-versions # mise, asdf
+    .husky .pre-commit-config.yaml      # Git hooks kept in the tree
+    .gitmodules .gitattributes
+    .venv venv                          # activating runs their scripts
+)
+trigger_expr=()
+for t in "${TRIGGERS[@]}"; do
+    trigger_expr+=(-o -name "$t")
+done
+trigger_expr=("${trigger_expr[@]:1}")
+unset t
+
+# The triggers in $1, as NUL-separated "path<TAB>latest change time of
+# their contents".  Change times (ctime), unlike modification times,
+# cannot be set back by the sandbox.
+host_triggers() {
+    local item times
+    while IFS= read -r -d '' item; do
+	if [ "${item##*/}" = .git ] && [ -d "$item" ]; then
+	    # Only what makes Git run code; the objects are data.
+	    times=$(find "$item/config" "$item/hooks" -printf '%C@\n' 2>/dev/null)
+	else
+	    times=$(find "$item" -printf '%C@\n' 2>/dev/null)
+	fi
+	printf '%s\t%s\0' "$item" "$(sort -n <<<"$times" | tail -n 1)"
+    done < <(find "$1" \( "${trigger_expr[@]}" \) -prune -print0)
+}
+
+# Entries printed now by "$@" that are not in the snapshot file $1,
+# one per line.
+new_since() {
+    local before=$1
+    shift
+    LC_ALL=C comm -z -13 "$before" <("$@" | LC_ALL=C sort -z) | tr '\0' '\n'
+}
+
 if [ -t 1 ]; then
     red=$'\e[31m' normal=$'\e[0m'
 else
@@ -160,7 +207,7 @@ fi
 # Hide the real .git of each repo under $work_path behind a clone in
 # $GIT_BACKUP, and show the real one read-only under /upstream.
 protect_repos() {
-    local f g repo rel_home copy upstream answer
+    local f g repo rel_home copy upstream hooks
     local -a links repos
 
     # Submodules and worktrees have a ".git" *file*: their Git data is
@@ -188,6 +235,16 @@ protect_repos() {
 	upstream="/upstream/$rel_home.git"
 
 	printf 'Git %s%s%s → %s\n' "$red" "$(rel_to_pwd "$repo")" "$normal" "$copy"
+
+	# Hooks kept in the working tree (e.g. Husky's ".husky") are
+	# writable by the sandbox and run at your next commit.
+	hooks=$(/usr/bin/git config --file "$g/config" core.hooksPath)
+	case $hooks in
+	    ""|/dev/null) ;;
+	    /*) [[ $hooks == "$repo"/* ]] &&
+		    echo "  core.hooksPath is inside the work tree: review $hooks after the session." >&2 ;;
+	    *)  echo "  core.hooksPath is inside the work tree: review $hooks after the session." >&2 ;;
+	esac
 
 	if [ ! -d "$copy/.git" ]; then
 	    # No copy yet: either a repo of yours seen for the first time,
@@ -232,17 +289,27 @@ slirp=
 agent_pid=
 
 cleanup() {
-    local new
+    local links triggers
     [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
     [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
-    if [ -f "$tmp/symlinks.before" ]; then
-	new=$(LC_ALL=C comm -z -13 "$tmp/symlinks.before" \
-		     <(outside_symlinks "$work_path" | LC_ALL=C sort -z) |
-		  tr '\0' '\n')
-	if [ -n "$new" ]; then
+    # The snapshots exist only once the sandbox was about to start.
+    if [ -f "$tmp/symlinks.before" ] && [ -f "$tmp/triggers.before" ]; then
+	links=$(new_since "$tmp/symlinks.before" outside_symlinks "$work_path")
+	triggers=$(new_since "$tmp/triggers.before" host_triggers "$work_path" |
+		       cut -f1)
+	if [ -n "$links$triggers" ]; then
 	    {
-		echo "$(date '+%F %T') New symlinks out of $work_path (don't follow them blindly):"
-		sed 's/^/  /' <<<"$new"
+		echo "$(date '+%F %T') Session in $work_path:"
+		if [ -n "$links" ]; then
+		    echo "New symlinks out of the work dir (don't follow them blindly):"
+		    sed 's/^/  /' <<<"$links"
+		fi
+		if [ -n "$triggers" ]; then
+		    echo "New or changed files that can run code on the host (review before"
+		    echo "entering these directories, opening them in an editor or running"
+		    echo "Git, npm, Cargo... there):"
+		    sed 's/^/  /' <<<"$triggers"
+		fi
 	    } | tee -a "$HOME/AI/warnings.log" >&2
 	fi
     fi
@@ -327,7 +394,6 @@ if [ -n "$work_path" ]; then
 	sed 's/^/  /' <<<"$mounts" >&2
 	confirm "Continue anyway?" || exit 1
     fi
-    outside_symlinks "$work_path" | LC_ALL=C sort -z >"$tmp/symlinks.before"
 
     # Mount outside $HOME: / is a tmpfs, so no mount point is left
     # behind in $AIHOME.
@@ -341,6 +407,11 @@ if [ -n "$work_path" ]; then
     else
 	protect_repos
     fi
+
+    # Snapshots for the checks at exit, taken after protect_repos, whose
+    # changes to the repos' config must not be reported.
+    outside_symlinks "$work_path" | LC_ALL=C sort -z >"$tmp/symlinks.before"
+    host_triggers "$work_path" | LC_ALL=C sort -z >"$tmp/triggers.before"
 else
     # No work directory, e.g. to install packages or AI tools in $HOME.
     args+=(--chdir "$HOME")
