@@ -20,6 +20,7 @@
 # them or run Git commands inside them: their configuration and hooks
 # are under the AI's control.
 
+# The base $HOME/AI is protected below.
 AIHOME="$HOME/AI/home"
 GIT_BACKUP="$HOME/AI/work"
 AI_SSH_KEY="$HOME/.ssh/id_ed25519_ai"
@@ -128,6 +129,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Helpers ------------------------------------------------------------
+
+# On some distributions (such as Fedora), /home is a symlink.
+home=$(realpath -e -- "$HOME") || die "Cannot resolve \$HOME."
 
 # Host-side Git: never run hooks or the fsmonitor.
 git() {
@@ -242,7 +246,7 @@ protect_repos() {
 
     for g in "${repos[@]}"; do
 	repo=${g%/.git}
-	rel_home=${repo#"$HOME"/}
+	rel_home=${repo#"$home"/}
 	copy="$GIT_BACKUP/$rel_home"
 	# The ".git" suffix keeps nested repos on separate mount points.
 	upstream="/upstream/$rel_home.git"
@@ -364,16 +368,16 @@ if [ -n "$work_path" ]; then
     if [ "$work_path" = / ]; then
 	die "Refusing to expose the whole file system."
     fi
-    case $HOME/ in
+    case $home/ in
 	"$work_path"/*)
 	    die "Refusing to expose your whole home directory ($work_path)." ;;
     esac
     case $work_path/ in
-	"$HOME"/.*)
+	"$home"/.*)
 	    die "Refusing to expose configuration files ($work_path)." ;;
-	"$HOME/AI"/*)
+	"$home/AI"/*)
 	    die "Refusing to expose the sandbox's own files ($work_path)." ;;
-	"$HOME/Personal"/*)
+	"$home/Personal"/*)
 	    die "Refusing to expose your personal files ($work_path)." ;;
     esac
 
@@ -511,7 +515,7 @@ if [ -n "$work_path" ]; then
 	--bind "$work_path" /work
 	--chdir /work
     )
-    if [ "${work_path#"$HOME"/}" = "$work_path" ]; then
+    if [ "${work_path#"$home"/}" = "$work_path" ]; then
 	# E.g. to experiment in a /tmp directory.
 	echo "$work_path is not under \$HOME: its Git repos are NOT protected." >&2
     else
