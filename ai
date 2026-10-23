@@ -39,6 +39,8 @@ table inet ai {
     }
 }'
 
+LOCKDIR="$HOME/AI/locks"
+
 die() {
     echo "ai: $*" >&2
     exit 1
@@ -118,6 +120,12 @@ if [ -n "$work_path" ]; then
 	"$HOME/Personal"/*)
 	    die "Refusing to expose your personal files ($work_path)." ;;
     esac
+
+    mkdir -p -- "$LOCKDIR" || exit 1
+    # Held until the script exits: the kernel releases the lock with
+    # the file descriptor, whatever the reason the script ends.
+    exec 9>"$LOCKDIR/$(printf %s "$work_path" | sha256sum | cut -c1-16).lock"
+    flock -n 9 || die "Another session is using $work_path. Exiting."
 fi
 
 # --- Helpers ------------------------------------------------------------
