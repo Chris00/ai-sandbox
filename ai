@@ -5,7 +5,10 @@
 #
 # Usage: ai [--ssh] [-w|--work DIR] [--] [COMMAND [ARG...]]
 #
-# The work directory DIR is mounted read-write at /work.  The real
+# The work directory DIR is mounted read-write at /work/PATH, where
+# PATH is DIR relative to your home (/work-tmp/DIR when DIR is outside
+# your home), so that tools keeping per-directory data (history,
+# memory...) tell your projects apart.  The real
 # ".git" directory of every Git repo in it is hidden: the sandbox sees
 # a clone kept in $GIT_BACKUP instead, so the AI cannot alter your
 # history, config or hooks.  Your real repo is visible read-only under
@@ -242,13 +245,14 @@ else
     red= normal=
 fi
 
-# protect_repos DIR: hide the real .git of each repo under DIR behind
-# a clone in $GIT_BACKUP, and show the real one read-only under
-# /upstream.  Modify $args to bind the copy (RW) and the upstream (RO).
+# protect_repos DIR MOUNT: hide the real .git of each repo under DIR
+# behind a clone in $GIT_BACKUP, and show the real one read-only under
+# /upstream.  MOUNT is where DIR is mounted in the sandbox.  Modify
+# $args to bind the copy (RW) and the upstream (RO).
 #
 # DIR must be the `realpath`.
 protect_repos() {
-    local dir=$1 f g repo rel_home copy upstream hooks
+    local dir=$1 mount=$2 f g repo rel_home copy upstream hooks
     local -a links repos
 
     # .git files (submodules, worktrees) and symlinks: their Git data
@@ -336,7 +340,7 @@ protect_repos() {
 	fi
 
 	args+=(
-	    --bind "$copy/.git" "/work/${g#"$dir"/}"
+	    --bind "$copy/.git" "$mount/${g#"$dir"/}"
 	    --ro-bind "$g" "$upstream"
 	)
     done
@@ -595,17 +599,22 @@ if [ -n "$work_path" ]; then
 	confirm "Continue anyway?" || exit 1
     fi
 
-    # Mount outside $HOME: / is a tmpfs, so no mount point is left
-    # behind in $AIHOME.
+    # A distinct path per work dir, so that tools keeping per-directory
+    # data (history, memory...) tell projects apart.  Mount outside
+    # $HOME: / is a tmpfs, so no mount point is left behind in $AIHOME.
+    case $work_path in
+	"$home"/*) work_mount="/work/${work_path#"$home"/}" ;;
+	*)         work_mount="/work-tmp$work_path" ;;
+    esac
     args+=(
-	--bind "$work_path" /work
-	--chdir /work
+	--bind "$work_path" "$work_mount"
+	--chdir "$work_mount"
     )
     if [ "${work_path#"$home"/}" = "$work_path" ]; then
 	# E.g. to experiment in a /tmp directory.
 	echo "$work_path is not under \$HOME: its Git repos are NOT protected." >&2
     else
-	protect_repos "$work_path"
+	protect_repos "$work_path" "$work_mount"
     fi
 
     # Snapshots for the checks at exit, taken after protect_repos, whose

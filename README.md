@@ -9,7 +9,7 @@ history, your local network, your SSH keys or the services running on
 your machine.
 
 ```console
-$ ai -w ~/software/project      # shell in the sandbox, project at /work
+$ ai -w ~/software/project      # shell in the sandbox, at /work/software/project
 $ ai -w ~/research/paper claude # run a command directly
 $ ai                            # no work dir, e.g. to install tools
 ```
@@ -23,7 +23,7 @@ namespaces.
 | Your…                     | Inside the sandbox                                                   |
 |---------------------------|----------------------------------------------------------------------|
 | home directory            | replaced by `~/AI/home`, a separate home for the agent               |
-| work directory (`-w DIR`) | read-write at `/work`; nothing else of yours is mounted              |
+| work directory (`-w DIR`) | read-write under `/work`; nothing else of yours is mounted           |
 | Git history and config    | each `.git` is hidden behind a clone, so the agent can't rewrite your history, hooks or config |
 | system                    | `/usr`, `/lib` and `/bin` read-only; a minimal `/etc`; private `/dev`, `/proc` and `/tmp` |
 | environment               | cleared: no tokens or session variables leak in                      |
@@ -117,8 +117,15 @@ sudo apt install bubblewrap slirp4netns util-linux nftables git python3-seccomp
 ai [--ssh] [-w|--work DIR] [--] [COMMAND [ARG...]]
 ```
 
-- `-w DIR`, `--work DIR`: mount `DIR` read-write at `/work` and start
-  there. Without it, the sandbox starts in the agent's home.
+- `-w DIR`, `--work DIR`: mount `DIR` read-write in the sandbox and
+  start there. Without it, the sandbox starts in the agent's home.
+  A directory in your home is mounted at `/work/` followed by its path
+  relative to your home (`~/software/project` at
+  `/work/software/project`). Any other directory, meant for temporary
+  experiments, is mounted at `/work-tmp/` followed by its full path
+  (`/tmp/test` at `/work-tmp/tmp/test`). Each project thus has its own
+  path, so tools that keep data per directory, such as an agent's
+  history or memory, keep the projects apart.
 - `--ssh`: give the sandbox an SSH agent holding only the agent's key.
 - `COMMAND`: run this instead of an interactive shell. Everything after
   the first non-option argument is passed to it unchanged, so
