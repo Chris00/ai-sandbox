@@ -22,10 +22,10 @@ namespaces.
 
 | Your…                     | Inside the sandbox                                                   |
 |---------------------------|----------------------------------------------------------------------|
-| home directory            | replaced by `~/AI/home`, a separate home for the agent               |
+| home directory            | replaced by `~/AI/home`, a separate home for the agent; only your TeX files (`~/texmf`) are added, read-only |
 | work directory (`-w DIR`) | read-write under `/work`; nothing else of yours is mounted           |
 | Git history and config    | each `.git` is hidden behind a clone, so the agent can't rewrite your history, hooks or config |
-| system                    | `/usr`, `/lib` and `/bin` read-only; a minimal `/etc`; private `/dev`, `/proc` and `/tmp` |
+| system                    | `/usr`, `/lib`, `/bin` and TeX's generated files (`/var/lib/texmf`) read-only; a minimal `/etc`; private `/dev`, `/proc` and `/tmp` |
 | environment               | cleared: no tokens or session variables leak in                      |
 | network                   | internet only, through [slirp4netns](https://github.com/rootless-containers/slirp4netns); the host's localhost and the local network (printers, NAS, router…) are blocked by a firewall the agent can't change |
 | SSH keys                  | never exposed; with `--ssh`, a private agent offers one dedicated key, usable only on the hosts you list |
@@ -312,6 +312,22 @@ Without a systemd user session, `ai` runs without limits and says so.
 
 The paths are set at the top of the script.
 
+A few directories of the host are also available in the sandbox,
+read-only, so that the agent can compile your LaTeX documents:
+
+| Path             | Contents                                                |
+|------------------|---------------------------------------------------------|
+| `~/texmf`        | your own TeX files: classes, packages, fonts…           |
+| `/var/lib/texmf` | the system's generated TeX files (formats, font maps…)  |
+
+Both are optional: `ai` skips them if they don't exist. `~/texmf` is
+TeX Live's default personal tree, searched without any setting, so it
+works in the sandbox even though the environment is cleared. Its files
+must follow the TeX Directory Structure: classes and packages anywhere
+under `~/texmf/tex/` (e.g. `~/texmf/tex/latex/mypackage/`), fonts under
+`~/texmf/fonts/`. To check that a file is found, run `kpsewhich
+myclass.cls` in the sandbox.
+
 `~/AI/home` and `~/AI/work` are controlled by the agent. On the host,
 treat them like a download from an unknown source: review files before
 opening them in an editor, entering the directories with a Git-aware
@@ -324,8 +340,9 @@ untrusted code harmless.
 
 - **Exfiltration.** Whatever the sandbox can read can be sent to the
   internet: the work directory, `~/AI/home` (including the agent's own
-  API key) and your real `.git` under `/upstream` (check that your
-  remote URLs in `.git/config` contain no tokens).
+  API key), your TeX files in `~/texmf` and your real `.git` under
+  `/upstream` (check that your remote URLs in `.git/config` contain no
+  tokens).
 - **Code you run later.** The agent's changes land in your working
   tree. Review them before running the code, its build files or its CI
   configuration on the host.
