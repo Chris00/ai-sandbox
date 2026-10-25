@@ -553,6 +553,7 @@ args=(
     --ro-bind /lib /lib
     --ro-bind-try /lib64 /lib64
     --ro-bind /bin /bin
+    --ro-bind-try /var/lib/texmf /var/lib/texmf
     --ro-bind-try /etc/alternatives /etc/alternatives
     --ro-bind "$tmp/resolv.conf" /etc/resolv.conf
     --ro-bind /etc/hosts /etc/hosts
@@ -567,6 +568,7 @@ args=(
     # namespace.
     --disable-userns
     --bind "$AIHOME/" "$HOME/"
+    --ro-bind-try "$HOME/texmf" "$HOME/texmf"
     --setenv HOME "$HOME"
     --setenv USER "$USER"
 )
