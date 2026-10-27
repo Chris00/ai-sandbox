@@ -45,11 +45,23 @@ table inet ai {
 
 LOCKDIR="$HOME/AI/locks"
 
-# Files and directories that make tools on the host run code, often
-# just by entering the directory or opening it in an editor.
-TRIGGERS=(
-    .git                                # a new repo: its config runs on `git status`
-    .envrc .direnv                      # direnv
+# Files and directories in the work dir that make tools on the host run
+# code, often just by entering the directory, opening it in an editor
+# or building the project.  In the sandbox:
+#
+# - the PRIVATE ones (build output, environments) are replaced by a
+#   private copy kept in $SHADOW: the agent builds there, and yours stay
+#   untouched;
+PRIVATE=(
+    target                              # Cargo: binaries, proc macros...
+    .venv venv                          # Python: activating runs their scripts
+    node_modules                        # npm, Yarn, pnpm
+    .direnv                             # direnv
+)
+# - the READONLY ones (configuration) are read-only: the agent sees your
+#   settings but can't change them.
+READONLY=(
+    .envrc                              # direnv
     .dir-locals.el .dir-locals-2.el     # Emacs
     .vscode .idea .devcontainer         # editors and IDEs
     .npmrc .yarnrc .yarnrc.yml .pnpmfile.cjs  # npm, Yarn, pnpm
@@ -57,8 +69,20 @@ TRIGGERS=(
     .mise.toml mise.toml .tool-versions # mise, asdf
     .husky .pre-commit-config.yaml      # Git hooks kept in the tree
     .gitmodules .gitattributes
-    .venv venv                          # activating runs their scripts
 )
+# Only existing entries can be protected, except for the PRIVATE ones
+# below, created at the top of the work dir by the tool that the file
+# on the right signals.
+declare -A PRIVATE_IF=(
+    [target]=Cargo.toml
+    [.venv]=pyproject.toml
+    [node_modules]=package.json
+    [.direnv]=.envrc
+)
+SHADOW="$HOME/AI/shadow"
+# Entries the agent creates during the session can't be protected: the
+# check at exit reports new and changed ones (and new repos).
+TRIGGERS=(.git "${PRIVATE[@]}" "${READONLY[@]}")
 
 # List of destination constraints of the form ‘[user@]dest-hostname’
 # for the $AI_SSH_KEY.  An empty list means that it is unrestricted
@@ -165,6 +189,15 @@ git_link_target() {
     fi
 }
 
+in_list() {    # in_list WORD LIST...: true if WORD is in LIST
+    local w=$1 x
+    shift
+    for x; do
+	[ "$x" = "$w" ] && return 0
+    done
+    return 1
+}
+
 confirm() {    # confirm QUESTION: true if the user answers yes
     local answer
     read -r -p "$1 [y/N] " answer </dev/tty || return 1
@@ -224,6 +257,10 @@ host_triggers() {
 	if [ "${item##*/}" = .git ] && [ -d "$item" ]; then
 	    # Only what makes Git run code; the objects are data.
 	    times=$(find "$item/config" "$item/hooks" -printf '%C@\n' 2>/dev/null)
+	elif in_list "${item##*/}" "${PRIVATE[@]}"; then
+	    # Build output can hold many files: existing ones are protected
+	    # and new ones are reported anyway, their path being new.
+	    times=$(find "$item" -maxdepth 0 -printf '%C@\n' 2>/dev/null)
 	else
 	    times=$(find "$item" -printf '%C@\n' 2>/dev/null)
 	fi
@@ -346,6 +383,56 @@ protect_repos() {
     done
 }
 
+# protect_tool_files DIR MOUNT: in the sandbox, replace the $PRIVATE
+# entries under DIR by private copies kept in $SHADOW, and make the
+# $READONLY ones read-only.  MOUNT is where DIR is mounted in the
+# sandbox.  Modify $args, and record the protected paths, NUL-separated,
+# in $tmp/protected, and the mount points bwrap creates in your tree in
+# $tmp/created (removed at exit).  Symlinks are skipped: a mount on one
+# would land wherever it points in the sandbox.
+#
+# DIR must be the `realpath` and under your home.
+protect_tool_files() {
+    local dir=$1 mount=$2 shadow_base p rel name
+    local -a expr found
+    shadow_base="$SHADOW/${dir#"$home"/}"
+    : >"$tmp/protected"
+    : >"$tmp/created"
+
+    expr=()
+    for name in "${PRIVATE[@]}" "${READONLY[@]}"; do
+	expr+=(-o -name "$name")
+    done
+    mapfile -d '' -t found < <(
+	find "$dir" -name .git -prune -o \( "${expr[@]:1}" \) \
+	     \( -type d -o -type f \) -prune -print0
+    )
+    # PRIVATE entries the project's tools would create at the top.
+    for name in "${!PRIVATE_IF[@]}"; do
+	p="$dir/$name"
+	if [ ! -e "$p" ] && [ ! -L "$p" ] && [ -e "$dir/${PRIVATE_IF[$name]}" ]; then
+	    found+=("$p")
+	    printf '%s\0' "$p" >>"$tmp/created"
+	fi
+    done
+
+    for p in "${found[@]}"; do
+	rel=${p#"$dir"/}
+	name=${p##*/}
+	if in_list "$name" "${PRIVATE[@]}"; then
+	    # A file named like a PRIVATE directory is left alone.
+	    [ -d "$p" ] || [ ! -e "$p" ] || continue
+	    mkdir -p -- "$shadow_base/$rel" || exit 1
+	    args+=(--bind "$shadow_base/$rel" "$mount/$rel")
+	    echo "Private in the sandbox: $(rel_to_pwd "$p")" >&2
+	else
+	    args+=(--ro-bind "$p" "$mount/$rel")
+	    echo "Read-only in the sandbox: $(rel_to_pwd "$p")" >&2
+	fi
+	printf '%s\0' "$p" >>"$tmp/protected"
+    done
+}
+
 # lock_work_path DIR: refuse to start when another session's work dir
 # is DIR, contains it or is inside it; otherwise register DIR.  The
 # lock stays held on file descriptor 9 until the script exits.
@@ -435,14 +522,23 @@ slirp=
 agent_pid=
 
 cleanup() {
-    local links triggers
+    local links triggers p
     [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
     [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
+    # Mount points bwrap created in your tree for absent PRIVATE entries.
+    if [ -f "$tmp/created" ]; then
+	while IFS= read -r -d '' p; do
+	    rmdir -- "$p" 2>/dev/null
+	done <"$tmp/created"
+    fi
     # The snapshots exist only once the sandbox was about to start.
     if [ -f "$tmp/symlinks.before" ] && [ -f "$tmp/triggers.before" ]; then
 	links=$(new_since "$tmp/symlinks.before" outside_symlinks "$work_path")
+	# The protected entries are out of the agent's reach: changes to
+	# them are yours.
 	triggers=$(new_since "$tmp/triggers.before" host_triggers "$work_path" |
-		       cut -f1)
+		       cut -f1 |
+		       grep -vxF -f <(tr '\0' '\n' <"$tmp/protected" 2>/dev/null))
 	if [ -n "$links$triggers" ]; then
 	    {
 		echo "$(date '+%F %T') Session in $work_path:"
@@ -571,6 +667,8 @@ args=(
     --ro-bind-try "$HOME/texmf" "$HOME/texmf"
     --setenv HOME "$HOME"
     --setenv USER "$USER"
+    # Keep the sandbox's Python bytecode out of the work dir.
+    --setenv PYTHONPYCACHEPREFIX "$HOME/.cache/pycache"
 )
 
 if [ -n "$ssh" ]; then
@@ -614,9 +712,28 @@ if [ -n "$work_path" ]; then
     )
     if [ "${work_path#"$home"/}" = "$work_path" ]; then
 	# E.g. to experiment in a /tmp directory.
-	echo "$work_path is not under \$HOME: its Git repos are NOT protected." >&2
+	echo "$work_path is not under \$HOME: its Git repos and tool files are NOT protected." >&2
     else
 	protect_repos "$work_path" "$work_mount"
+	protect_tool_files "$work_path" "$work_mount"
+    fi
+
+    # Python on your machine would otherwise use the bytecode (.pyc) the
+    # agent can leave in __pycache__ directories next to the sources.
+    # A relative value (Python doesn't expand "~") is resolved against
+    # the directory Python runs in, possibly the work dir.
+    if [ -n "$(find "$work_path" -name .git -prune -o -name '*.py' -print -quit)" ]; then
+	case $PYTHONPYCACHEPREFIX in
+	    /*) pycache=$(realpath -m -- "$PYTHONPYCACHEPREFIX") ;;
+	    *)  pycache=$work_path ;;
+	esac
+	case $pycache/ in
+	    "$work_path"/*|"$home/AI"/*)
+		echo "Warning: PYTHONPYCACHEPREFIX is not an absolute path outside the work dir:" >&2
+		echo "  Python on your machine would use the bytecode the agent leaves in __pycache__." >&2
+		echo "  Set it in your shell profile, e.g. export PYTHONPYCACHEPREFIX=\"\$HOME/.cache/pycache\"" >&2
+		;;
+	esac
     fi
 
     # Snapshots for the checks at exit, taken after protect_repos, whose

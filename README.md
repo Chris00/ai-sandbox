@@ -25,6 +25,7 @@ namespaces.
 | home directory            | replaced by `~/AI/home`, a separate home for the agent; only your TeX files (`~/texmf`) are added, read-only |
 | work directory (`-w DIR`) | read-write under `/work`; nothing else of yours is mounted           |
 | Git history and config    | each `.git` is hidden behind a clone, so the agent can't rewrite your history, hooks or config |
+| build output and tool settings | `target/`, `.venv/`, `node_modules/`… replaced by private directories; settings that make tools run code (`.envrc`, `.cargo/`, `.vscode/`…) read-only (see [Tool files](#tool-files)) |
 | system                    | `/usr`, `/lib`, `/bin` and TeX's generated files (`/var/lib/texmf`) read-only; a minimal `/etc`; private `/dev`, `/proc` and `/tmp` |
 | environment               | cleared: no tokens or session variables leak in                      |
 | network                   | internet only, through [slirp4netns](https://github.com/rootless-containers/slirp4netns); the host's localhost and the local network (printers, NAS, router…) are blocked by a firewall the agent can't change |
@@ -41,10 +42,12 @@ The script also checks the host side, before and after each session:
   sockets or named pipes: the sandbox could talk to the program behind
   a socket, bypassing the network firewall.
 - **At exit**, it reports new symlinks pointing out of the work
-  directory, and new or changed files that make tools on the host run
-  code: `.envrc`, `.vscode/`, `.dir-locals.el`, `.npmrc`, `.cargo/`,
-  `.husky/`, new `.git` repos, virtualenvs… These warnings are also
-  appended to `~/AI/warnings.log`.
+  directory, and files that make tools on the host run code that the
+  agent may have created or changed: `.envrc`, `.vscode/`,
+  `.dir-locals.el`, `.npmrc`, `.cargo/`, `.husky/`, new `.git` repos,
+  virtualenvs… Those protected at startup aren't reported, since the
+  agent couldn't change them. These warnings are also appended to
+  `~/AI/warnings.log`.
 
 
 ## Requirements
@@ -99,7 +102,21 @@ sudo apt install bubblewrap slirp4netns util-linux nftables git python3-seccomp
    git config --global safe.bareRepository explicit
    ```
 
-5. Optionally, for `--ssh`, create a key reserved for the agent, and
+5. Tell Python on your machine to keep its bytecode cache outside your
+   projects. Otherwise it would use the `.pyc` files the agent can leave
+   in `__pycache__` directories next to the sources, and those can
+   differ from the source you review. In your shell profile (and the
+   environment of your editor):
+
+   ```sh
+   export PYTHONPYCACHEPREFIX="$HOME/.cache/pycache"
+   ```
+
+   Use an absolute path: Python doesn't expand `~` here. `ai` warns when
+   the work directory contains Python files and the variable isn't set
+   that way.
+
+6. Optionally, for `--ssh`, create a key reserved for the agent, and
    register it only where the agent needs it (see [SSH](#ssh)):
 
    ```sh
@@ -170,6 +187,43 @@ Not handled: submodules and worktrees, whose `.git` is a file rather
 than a directory. `ai` lists them at startup. Repositories in a work
 directory outside your home aren't protected either, and `ai` warns
 about it.
+
+
+## Tool files
+
+Some files in a project make tools on your machine run code: when you
+build it, open it in an editor, or simply enter its directory. Since
+you may work in the project while the agent does, `ai` keeps the
+agent's hands off them for the whole session, rather than only
+reporting changes at the end. Two lists at the top of the script set
+which ones:
+
+- **`PRIVATE`** (build output and environments: `target/`, `.venv/`,
+  `venv/`, `node_modules/`, `.direnv/`): the sandbox sees a private
+  directory instead, kept in `~/AI/shadow/<path>`. The agent builds and
+  installs there, and keeps its builds between sessions; yours stay
+  untouched. The agent starts with an empty one, so it rebuilds or
+  reinstalls once.
+- **`READONLY`** (settings: `.envrc`, `.cargo/`, `.vscode/`, `.idea/`,
+  `.dir-locals.el`, `.npmrc`, `mise.toml`, `.husky/`,
+  `.pre-commit-config.yaml`, `.gitattributes`, `.gitmodules`…): the
+  agent sees yours, read-only, so it builds and commits as you do but
+  can't change them. If a change is needed, it can propose it for you
+  to apply.
+
+`ai` lists them at startup. Only entries that already exist can be
+protected, anywhere in the work directory, except `target/`, `.venv/`,
+`node_modules/` and `.direnv/` at the top, which are protected as soon
+as `Cargo.toml`, `pyproject.toml`, `package.json` or `.envrc` is there:
+the empty directory created for them in your tree is removed at exit.
+Entries the agent creates elsewhere during the session can't be
+protected, and are reported at exit. Symlinks are skipped.
+
+Inside the sandbox, Python keeps its bytecode in the agent's home
+(`PYTHONPYCACHEPREFIX`) rather than in `__pycache__` directories of
+your tree. That doesn't stop the agent from writing some there on
+purpose: hence the setting for your own machine in
+[Installation](#installation).
 
 
 ## SSH
@@ -306,6 +360,7 @@ Without a systemd user session, `ai` runs without limits and says so.
 |----------------------|--------------------------------------------------|
 | `~/AI/home`          | the agent's home directory                       |
 | `~/AI/work`          | the clones of your repositories' `.git`          |
+| `~/AI/shadow`        | the agent's private build output and environments |
 | `~/AI/locks`         | one lock per running session                     |
 | `~/AI/warnings.log`  | warnings from the checks at exit                 |
 | `~/.ssh/id_ed25519_ai` | the agent's SSH key (`--ssh`)                  |
@@ -328,7 +383,7 @@ under `~/texmf/tex/` (e.g. `~/texmf/tex/latex/mypackage/`), fonts under
 `~/texmf/fonts/`. To check that a file is found, run `kpsewhich
 myclass.cls` in the sandbox.
 
-`~/AI/home` and `~/AI/work` are controlled by the agent. On the host,
+`~/AI/home`, `~/AI/work` and `~/AI/shadow` are controlled by the agent. On the host,
 treat them like a download from an unknown source: review files before
 opening them in an editor, entering the directories with a Git-aware
 prompt or running commands there.
@@ -346,7 +401,7 @@ untrusted code harmless.
 - **Code you run later.** The agent's changes land in your working
   tree. Review them before running the code, its build files or its CI
   configuration on the host.
-- **The agent's own directories.** `~/AI/home` and `~/AI/work` are
+- **The agent's own directories.** `~/AI/home`, `~/AI/work` and `~/AI/shadow` are
   controlled by the agent, and the exit check doesn't scan them. On the
   host, treat them like the work tree (see [Files](#files)).
 - **The kernel.** All sandboxing relies on the Linux kernel, and a
