@@ -3,12 +3,16 @@
 # ai — run a shell (or a command) for an AI agent inside a bubblewrap
 # sandbox.
 #
-# Usage: ai [--ssh] [-w|--work DIR] [--] [COMMAND [ARG...]]
+# Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 #
-# The work directory DIR is mounted read-write at /work/PATH, where
-# PATH is DIR relative to your home (/work-tmp/DIR when DIR is outside
-# your home), so that tools keeping per-directory data (history,
-# memory...) tell your projects apart.  The real
+# Without COMMAND, run an interactive shell.  Without -w, the sandbox
+# starts in the agent's home, e.g. to install tools.
+#
+# With -w, the current directory is the work directory: it is mounted
+# read-write at /work/PATH, where PATH is its path relative to your
+# home (/work-tmp/DIR for a directory DIR outside your home), so that
+# tools keeping per-directory data (history, memory...) tell your
+# projects apart.  The real
 # ".git" directory of every Git repo in it is hidden: the sandbox sees
 # a clone kept in $GIT_BACKUP instead, so the AI cannot alter your
 # history, config or hooks.  Your real repo is visible read-only under
@@ -22,6 +26,14 @@
 # From the host, only ever *fetch from* the copies.  Never push into
 # them or run Git commands inside them: their configuration and hooks
 # are under the AI's control.
+#
+# --ro PATTERN... (or --read-only) makes what matches the PATTERNs, up
+# to the next option or "--", read-only in the sandbox.  Without a "/",
+# a PATTERN matches names anywhere in the work dir (e.g. '*.pdf'); with
+# one, paths relative to it (e.g. 'data/raw', 'docs/*.pdf', where "*"
+# also matches "/"); "." is the whole work dir.  An unquoted glob,
+# expanded by your shell, only gives what is in the current directory
+# itself: quote it to reach subdirectories.
 
 # The base $HOME/AI is protected below.
 AIHOME="$HOME/AI/home"
@@ -98,7 +110,7 @@ die() {
 #
 # The whole session (sandbox, slirp4netns, ssh-agent) runs in a systemd
 # scope with resource limits.  The defaults can be changed from the
-# environment, e.g. "AI_CPUS=2 ai -w proj".
+# environment, e.g. "AI_CPUS=2 ai -w".
 AI_MEMORY=${AI_MEMORY:-50%}             # of the RAM
 AI_SWAP=${AI_SWAP:-$(awk '/^SwapTotal:/ { print int($2 / 2) "K" }' /proc/meminfo)}
 AI_CPUS=${AI_CPUS:-$(( ($(nproc) + 1) / 2 ))}
@@ -126,33 +138,45 @@ fi
 
 ssh=
 work_path=
+read_only=()
 cmd=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+	-w|--work)
+	    work_path=$(realpath -e -- .) || die "Cannot resolve the current directory."
+	    shift
+	    ;;
 	--ssh)
 	    ssh=1
 	    shift
 	    ;;
-	-w|--work)
-	    [ $# -ge 2 ] || die "$1 needs a directory."
-	    work_path=$(realpath -e -- "$2" 2>/dev/null) ||
-		die "The path \"$2\" does not exist."
-	    [ -d "$work_path" ] || die "\"$2\" is not a directory."
-	    shift 2
+	--ro|--read-only)
+	    # All the patterns up to the next option or "--": an unquoted
+	    # glob, expanded by the shell, gives several.  A pattern
+	    # starting with "-" needs the --ro=PATTERN form or "./".
+	    [ $# -ge 2 ] && [[ $2 != -* ]] || die "$1 needs at least one pattern."
+	    shift
+	    while [ $# -gt 0 ] && [[ $1 != -* ]]; do
+		read_only+=("$1")
+		shift
+	    done
+	    ;;
+	--ro=*|--read-only=*)
+	    read_only+=("${1#*=}")
+	    shift
 	    ;;
 	--)
 	    shift
 	    cmd=("$@")
+	    [ ${#cmd[@]} -gt 0 ] || die "Nothing after \"--\": give the command to run."
 	    break
 	    ;;
 	-*)
 	    die "Unknown option $1"
 	    ;;
 	*)
-	    # The command and all its arguments, options included.
-	    cmd=("$@")
-	    break
+	    die "Unexpected \"$1\": put the command to run after \"--\"."
 	    ;;
     esac
 done
@@ -283,7 +307,7 @@ watch_triggers() {
     local dir=$1 events path p
     local -a found
     local -A seen
-    # The protected entries, including the mount points bwrap creates
+    # The protected entries, including the mount points created
     # for absent PRIVATE ones, are out of the agent's reach.
     if [ -f "$tmp/protected" ]; then
 	while IFS= read -r -d '' p; do
@@ -476,7 +500,7 @@ protect_repos() {
 # entries under DIR by private copies kept in $SHADOW, and make the
 # $READONLY ones read-only.  MOUNT is where DIR is mounted in the
 # sandbox.  Modify $args, and record the protected paths, NUL-separated,
-# in $tmp/protected, and the mount points bwrap creates in your tree in
+# in $tmp/protected, and the mount points created in your tree in
 # $tmp/created (removed at exit).  Symlinks are skipped: a mount on one
 # would land wherever it points in the sandbox.
 #
@@ -511,6 +535,9 @@ protect_tool_files() {
 	if in_list "$name" "${PRIVATE[@]}"; then
 	    # A file named like a PRIVATE directory is left alone.
 	    [ -d "$p" ] || [ ! -e "$p" ] || continue
+	    # Create the mount point ourselves: bwrap couldn't if the work
+	    # dir is read-only in the sandbox (--ro .).
+	    [ -e "$p" ] || mkdir -- "$p" || exit 1
 	    mkdir -p -- "$shadow_base/$rel" || exit 1
 	    args+=(--bind "$shadow_base/$rel" "$mount/$rel")
 	    echo "Private in the sandbox: $(rel_to_pwd "$p")" >&2
@@ -520,6 +547,83 @@ protect_tool_files() {
 	fi
 	printf '%s\0' "$p" >>"$tmp/protected"
     done
+}
+
+# protect_read_only DIR MOUNT PATTERN...: make what matches the
+# PATTERNs (see --ro) under DIR read-only in the sandbox, where DIR is
+# mounted at MOUNT.  Modify $args.  Only what exists now is protected:
+# files matching a pattern that the agent creates later are writable.
+# The .git and $PRIVATE directories are skipped: the sandbox sees a
+# clone or a private copy there.  Symlinks are skipped too: a mount on
+# one would land wherever it points in the sandbox.
+#
+# DIR must be the `realpath`.
+protect_read_only() {
+    local dir=$1 mount=$2 pat dir_glob p n total=0
+    local -a skip test found
+    shift 2
+    skip=(-name .git)
+    for n in "${PRIVATE[@]}"; do
+	skip+=(-o -name "$n")
+    done
+    # find's -path takes a pattern: escape the work dir's own path.
+    dir_glob=$(printf '%s' "$dir" | sed 's/[][*?\\]/\\&/g')
+
+    for pat; do
+	case $pat in
+	    /*) # An absolute path or pattern must be in the work dir.
+		case $pat/ in
+		    "$dir"/*)
+			pat=${pat#"$dir"}
+			pat=${pat#/}
+			pat=${pat:-.}
+			;;
+		    *) die "--ro: $pat is not in the work dir ($dir)." ;;
+		esac ;;
+	esac
+	pat=${pat%/}
+	pat=${pat#./}
+	if [ "$pat" = . ] || [ -z "$pat" ]; then
+	    found=("$dir")
+	else
+	    if [[ $pat == */* ]]; then
+		test=(-path "$dir_glob/$pat")
+	    else
+		test=(-name "$pat")
+	    fi
+	    mapfile -d '' -t found < <(
+		find "$dir" -mindepth 1 \( "${skip[@]}" \) -prune -o \
+		     "${test[@]}" -prune -print0
+	    )
+	fi
+	n=0
+	for p in "${found[@]}"; do
+	    if [ -L "$p" ]; then
+		echo "--ro: symlink skipped: $(rel_to_pwd "$p")" >&2
+		continue
+	    fi
+	    if [ "$p" = "$dir" ]; then
+		args+=(--ro-bind "$dir" "$mount")
+	    else
+		args+=(--ro-bind "$p" "$mount/${p#"$dir"/}")
+	    fi
+	    n=$((n + 1))
+	done
+	if [ "$n" -eq 0 ]; then
+	    echo "--ro: nothing matches '$pat' in the work dir." >&2
+	elif [ "$n" -le 3 ]; then
+	    for p in "${found[@]}"; do
+		[ -L "$p" ] || echo "Read-only in the sandbox: $(rel_to_pwd "$p")" >&2
+	    done
+	else
+	    echo "Read-only in the sandbox: $n entries matching '$pat'." >&2
+	fi
+	total=$((total + n))
+    done
+    # Each entry is a mount; a great many slow the sandbox's start.
+    if [ "$total" -gt 2000 ]; then
+	echo "--ro: $total read-only mounts; a pattern on a directory would need fewer." >&2
+    fi
 }
 
 # lock_work_path DIR: refuse to start when another session's work dir
@@ -600,6 +704,8 @@ if [ -n "$work_path" ]; then
     esac
 
     lock_work_path "$work_path"
+elif [ ${#read_only[@]} -gt 0 ]; then
+    die "--ro needs -w: the patterns are in the work directory."
 fi
 
 # --- Temporary files (removed on exit) ----------------------------------
@@ -620,7 +726,7 @@ cleanup() {
 	kill "$watch_pid" 2>/dev/null
 	wait "$watch_reader" 2>/dev/null   # it ends with inotifywait's output
     fi
-    # Mount points bwrap created in your tree for absent PRIVATE entries.
+    # Mount points created in your tree for absent PRIVATE entries.
     if [ -f "$tmp/created" ]; then
 	while IFS= read -r -d '' p; do
 	    rmdir -- "$p" 2>/dev/null
@@ -805,6 +911,11 @@ if [ -n "$work_path" ]; then
 	--bind "$work_path" "$work_mount"
 	--chdir "$work_mount"
     )
+    # Before the other mounts in the work dir: a read-only bind of a
+    # directory would otherwise cover the clones and private copies
+    # mounted inside it, and expose what they hide.
+    [ ${#read_only[@]} -eq 0 ] ||
+	protect_read_only "$work_path" "$work_mount" "${read_only[@]}"
     if [ "${work_path#"$home"/}" = "$work_path" ]; then
 	# E.g. to experiment in a /tmp directory.
 	echo "$work_path is not under \$HOME: its Git repos and tool files are NOT protected." >&2
@@ -846,6 +957,7 @@ if [ -n "$work_path" ]; then
     fi
 else
     # No work directory, e.g. to install packages or AI tools in $HOME.
+    echo "No work directory: the sandbox starts in the agent's home (-w to work here)." >&2
     args+=(--chdir "$HOME")
 fi
 

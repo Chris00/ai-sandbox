@@ -9,8 +9,9 @@ history, your local network, your SSH keys or the services running on
 your machine.
 
 ```console
-$ ai -w ~/software/project      # shell in the sandbox, at /work/software/project
-$ ai -w ~/research/paper claude # run a command directly
+$ cd ~/software/project
+$ ai -w                         # shell in the sandbox, at /work/software/project
+$ ai -w -- claude               # run a command directly
 $ ai                            # no work dir, e.g. to install tools
 ```
 
@@ -23,7 +24,7 @@ namespaces.
 | Your…                     | Inside the sandbox                                                   |
 |---------------------------|----------------------------------------------------------------------|
 | home directory            | replaced by `~/AI/home`, a separate home for the agent; only your TeX files (`~/texmf`) are added, read-only |
-| work directory (`-w DIR`) | read-write under `/work`; nothing else of yours is mounted           |
+| work directory (`-w`)     | the current directory, read-write under `/work`; nothing else of yours is mounted |
 | Git history and config    | each `.git` is hidden behind a clone, so the agent can't rewrite your history, hooks or config |
 | build output and tool settings | `target/`, `.venv/`, `node_modules/`… replaced by private directories; settings that make tools run code (`.envrc`, `.cargo/`, `.vscode/`…) read-only (see [Tool files](#tool-files)) |
 | system                    | `/usr`, `/lib`, `/bin` and TeX's generated files (`/var/lib/texmf`) read-only; a minimal `/etc`; private `/dev`, `/proc` and `/tmp` |
@@ -154,27 +155,69 @@ on inotify watches; `ai` then says so. Raise it with, for example,
 ## Usage
 
 ```
-ai [--ssh] [-w|--work DIR] [--] [COMMAND [ARG...]]
+ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 ```
 
-- `-w DIR`, `--work DIR`: mount `DIR` read-write in the sandbox and
-  start there. Without it, the sandbox starts in the agent's home.
-  A directory in your home is mounted at `/work/` followed by its path
-  relative to your home (`~/software/project` at
+- `-w`, `--work`: make the current directory the work directory: it is
+  mounted read-write in the sandbox, which starts there. Without `-w`,
+  the sandbox starts in the agent's home and none of your files are
+  mounted. A directory in your home is mounted at `/work/` followed by
+  its path relative to your home (`~/software/project` at
   `/work/software/project`). Any other directory, meant for temporary
   experiments, is mounted at `/work-tmp/` followed by its full path
   (`/tmp/test` at `/work-tmp/tmp/test`). Each project thus has its own
   path, so tools that keep data per directory, such as an agent's
   history or memory, keep the projects apart.
+- `--ro PATTERN...`, `--read-only PATTERN...`: make what matches the
+  patterns read-only in the sandbox (see
+  [Read-only files](#read-only-files)). Needs `-w`.
 - `--ssh`: give the sandbox an SSH agent holding only the agent's key.
-- `COMMAND`: run this instead of an interactive shell. Everything after
-  the first non-option argument is passed to it unchanged, so
-  `ai -w proj ls -l` works.
+- `-- COMMAND [ARG...]`: run `COMMAND` instead of an interactive shell.
+  Everything after `--` is passed to it unchanged, options included:
+  `ai -w -- ls -l`.
 
 For safety, `ai` refuses `/`, your whole home directory, hidden
 directories in your home, `~/AI` itself and `~/Personal` as work
 directories. Only one session at a time may use a given directory, or
 a directory containing or inside it.
+
+
+## Read-only files
+
+`--ro` protects parts of the work directory that the agent should read
+but not change, such as reference documents, raw data or a whole
+project to review:
+
+```sh
+cd ~/research/paper
+ai -w --ro '*.pdf' data/raw -- claude
+ai -w --ro .                           # everything read-only
+```
+
+`--ro` takes all the patterns up to the next option or `--`, and can
+be repeated.
+
+| Pattern                 | Matches                                                    |
+|-------------------------|------------------------------------------------------------|
+| without `/` (`*.pdf`)   | names anywhere in the work directory                       |
+| with `/` (`docs/*.pdf`) | paths relative to the work directory; `*` also matches `/` |
+| `.`                     | the whole work directory                                   |
+| an absolute path        | the same, if it is in the work directory                   |
+
+Quoting a pattern makes it reach subdirectories: `--ro '*.pdf'`
+protects every PDF in the work directory. Unquoted, your shell expands
+`*.pdf` itself, to the PDFs of the current directory only (bash leaves
+it as is when there are none, and zsh refuses to run the command). A
+matching directory is read-only with everything in it. A pattern
+starting with `-` needs the `--ro=PATTERN` form, or `./` in front.
+
+Only what exists at startup is protected: a new file matching a pattern
+that the agent creates during the session is writable. Each match is a
+separate mount, so a pattern on a directory is better than one matching
+thousands of files. `.git`, the private directories (`target/`,
+`.venv/`…) and symlinks are skipped: the agent keeps its own clone and
+build directories, even with `--ro .`, so it can still commit and
+build, but not change your files.
 
 
 ## Working with Git
@@ -351,7 +394,7 @@ sandbox, slirp4netns and ssh-agent) shares these limits:
 Override them from the environment:
 
 ```sh
-AI_CPUS=2 AI_MEMORY=8G ai -w ~/software/project
+AI_CPUS=2 AI_MEMORY=8G ai -w
 ```
 
 The session also runs at a lower CPU and I/O priority than your other
