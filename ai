@@ -254,6 +254,12 @@ rel_to_pwd() {
     esac
 }
 
+# glob_escape PATH: PATH as a pattern matching itself only (for find's
+# -path, -name...).
+glob_escape() {
+    printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'
+}
+
 rel_to_home() {
     case $1 in
 	"$HOME")   echo "~" ;;
@@ -291,10 +297,12 @@ confirm() {    # confirm QUESTION: true if the user answers yes
     [[ $answer == [yY]* ]]
 }
 
-# Files in $1 with a hard link outside it.  The .git directories are
-# skipped: protect_repos hides them from the sandbox.
+# The checks on the work dir below skip what the sandbox doesn't see of
+# it: the find tests in $hidden (set once the work dir is known).
+
+# Files in $1 with a hard link outside it.
 outside_hardlinks() {
-    find "$1" -name .git -prune -o -type f -links +1 -printf '%D:%i %n %p\0' |
+    find "$1" \( "${hidden[@]}" \) -prune -o -type f -links +1 -printf '%D:%i %n %p\0' |
 	awk 'BEGIN { RS = "\0" }
 	      { k = $1; n[k] = $2; c[k]++
 		if (!(k in p)) p[k] = substr($0, length($1) + length($2) + 3) }
@@ -311,10 +319,9 @@ inner_mounts() {
 
 # Unix sockets or named pipes in $1.  They work across namespaces: the
 # sandbox could talk to the host program listening on one, bypassing
-# the firewall.  The .git directories are skipped: protect_repos hides
-# them.
+# the firewall.
 inner_sockets() {
-    find "$1" -name .git -prune -o \( -type s -o -type p \) -print
+    find "$1" \( "${hidden[@]}" \) -prune -o \( -type s -o -type p \) -print
 }
 
 # Symlinks in $1 resolving outside it, as NUL-separated "link → target".
@@ -325,7 +332,7 @@ outside_symlinks() {
 	    "$1"|"$1"/*) ;;
 	    *) printf '%s → %s\0' "$(rel_to_pwd "$f")" "$(readlink -- "$f")" ;;
 	esac
-    done < <(find "$1" -name .git -prune -o -type l -print0)
+    done < <(find "$1" \( "${hidden[@]}" \) -prune -o -type l -print0)
 }
 
 trigger_expr=()
@@ -564,8 +571,9 @@ protect_repos() {
 # entries under DIR by private copies kept in $SHADOW, and make the
 # $READONLY ones read-only.  MOUNT is where DIR is mounted in the
 # sandbox.  Modify $args, and record the protected paths, NUL-separated,
-# in $tmp/protected, and the mount points created in your tree in
-# $tmp/created (removed at exit).  Symlinks are skipped: a mount on one
+# in $tmp/protected, the mount points created in your tree in
+# $tmp/created (removed at exit), and the replaced directories in
+# $shadowed (skipped by the checks).  Symlinks are skipped: a mount on one
 # would land wherever it points in the sandbox.
 #
 # DIR must be the `realpath` and under your home.
@@ -604,6 +612,7 @@ protect_tool_files() {
 	    [ -e "$p" ] || mkdir -- "$p" || exit 1
 	    mkdir -p -- "$shadow_base/$rel" || exit 1
 	    args+=(--bind "$shadow_base/$rel" "$mount/$rel")
+	    shadowed+=("$p")
 	    printf "Private in the sandbox: %s%s%s\n" \
 		   "$red" "$(rel_to_pwd "$p")" "$normal" >&2
 	else
@@ -633,7 +642,7 @@ protect_read_only() {
 	skip+=(-o -name "$n")
     done
     # find's -path takes a pattern: escape the work dir's own path.
-    dir_glob=$(printf '%s' "$dir" | sed 's/[][*?\\]/\\&/g')
+    dir_glob=$(glob_escape "$dir")
 
     for pat; do
 	case $pat in
@@ -776,6 +785,14 @@ if [ -n "$work_path" ]; then
 elif [ ${#read_only[@]} -gt 0 ]; then
     die "--ro needs -w: the patterns are in the work directory."
 fi
+
+# What the sandbox doesn't see of the work dir, as find tests: each .git
+# (replaced by a clone) and the directories protect_tool_files replaces
+# by private copies, which it records in $shadowed.  The checks on the
+# work dir skip them: hard links or sockets in a shadowed .venv, say,
+# don't matter.
+hidden=(-name .git)
+shadowed=()
 
 # --- Temporary files (removed on exit) ----------------------------------
 
@@ -950,25 +967,6 @@ if [ -n "$ssh" ]; then
 fi
 
 if [ -n "$work_path" ]; then
-    links=$(outside_hardlinks "$work_path")
-    if [ -n "$links" ]; then
-	echo "Hard-linked outside the work dir (the sandbox could modify these files):" >&2
-	sed 's/^/  /' <<<"$links" >&2
-	confirm "Continue anyway?" || exit 1
-    fi
-    mounts=$(inner_mounts "$work_path")
-    if [ -n "$mounts" ]; then
-	echo "File systems mounted inside the work dir (exposed too):" >&2
-	sed 's/^/  /' <<<"$mounts" >&2
-	confirm "Continue anyway?" || exit 1
-    fi
-    sockets=$(inner_sockets "$work_path")
-    if [ -n "$sockets" ]; then
-	echo "Unix sockets or named pipes in the work dir (the sandbox could talk to the programs behind them):" >&2
-	sed 's/^/  /' <<<"$sockets" >&2
-	confirm "Continue anyway?" || exit 1
-    fi
-
     # A distinct path per work dir, so that tools keeping per-directory
     # data (history, memory...) tell projects apart.  Mount outside
     # $HOME: / is a tmpfs, so no mount point is left behind in $AIHOME.
@@ -993,11 +991,35 @@ if [ -n "$work_path" ]; then
 	protect_tool_files "$work_path" "$work_mount"
     fi
 
+    # The checks on what the sandbox will see of the work dir: after
+    # protect_tool_files, which says what it replaces.
+    for p in "${shadowed[@]}"; do
+	hidden+=(-o -path "$(glob_escape "$p")")
+    done
+    links=$(outside_hardlinks "$work_path")
+    if [ -n "$links" ]; then
+	echo "Hard-linked outside the work dir (the sandbox could modify these files):" >&2
+	sed 's/^/  /' <<<"$links" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+    mounts=$(inner_mounts "$work_path")
+    if [ -n "$mounts" ]; then
+	echo "File systems mounted inside the work dir (exposed too):" >&2
+	sed 's/^/  /' <<<"$mounts" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+    sockets=$(inner_sockets "$work_path")
+    if [ -n "$sockets" ]; then
+	echo "Unix sockets or named pipes in the work dir (the sandbox could talk to the programs behind them):" >&2
+	sed 's/^/  /' <<<"$sockets" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+
     # Python on your machine would otherwise use the bytecode (.pyc) the
     # agent can leave in __pycache__ directories next to the sources.
     # A relative value (Python doesn't expand "~") is resolved against
     # the directory Python runs in, possibly the work dir.
-    if [ -n "$(find "$work_path" -name .git -prune -o -name '*.py' -print -quit)" ]; then
+    if [ -n "$(find "$work_path" \( "${hidden[@]}" \) -prune -o -name '*.py' -print -quit)" ]; then
 	case $PYTHONPYCACHEPREFIX in
 	    /*) pycache=$(realpath -m -- "$PYTHONPYCACHEPREFIX") ;;
 	    *)  pycache=$work_path ;;
