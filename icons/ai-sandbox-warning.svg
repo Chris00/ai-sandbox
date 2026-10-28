@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ai-sandbox-warning: the ai-sandbox icon in alert, bright red. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>ai-sandbox: warning</title>
+  <circle cx="32" cy="32" r="28" fill="none" stroke="#e5383b" stroke-width="4.5"/>
+  <path d="M32 10 Q34.6 29.4 54 32 Q34.6 34.6 32 54 Q29.4 34.6 10 32 Q29.4 29.4 32 10 Z"
+        fill="#e5383b"/>
+</svg>

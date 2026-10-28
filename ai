@@ -248,6 +248,95 @@ done
 trigger_expr=("${trigger_expr[@]:1}")
 unset t
 
+# The icon of the notifications: in the repo next to the script, or
+# installed in your icon theme; otherwise the theme's warning icon.
+NOTIFY_ICON=dialog-warning
+for icon in \
+    "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/icons/ai-sandbox-warning.svg" \
+	"${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/ai-sandbox-warning.svg"
+do
+    if [ -r "$icon" ]; then
+	NOTIFY_ICON=$icon
+	break
+    fi
+done
+unset icon
+
+# report_trigger DIR PATH: a new $TRIGGERS entry PATH appeared in the
+# work dir DIR.  Log it and, when possible, show a desktop notification.
+report_trigger() {
+    local dir=$1 path=$2 where
+    where="${dir##*/}/${path#"$dir"/}"
+    printf '%s New during the session in %s: %s\n' \
+	   "$(date '+%F %T')" "$dir" "$path" >>"$HOME/AI/warnings.log"
+    if command -v notify-send >/dev/null; then
+	notify-send -a ai -u critical -i "$NOTIFY_ICON" \
+		    "ai: new ${path##*/}" \
+		    "$where was just created, by you or the agent. Review it before using the project on your machine." \
+		    2>/dev/null
+    fi
+}
+
+# watch_triggers DIR: read the events of inotifywait, one "EVENTS<TAB>PATH"
+# per line, and report the new $TRIGGERS entries in DIR.
+watch_triggers() {
+    local dir=$1 events path p
+    local -a found
+    local -A seen
+    # The protected entries, including the mount points bwrap creates
+    # for absent PRIVATE ones, are out of the agent's reach.
+    if [ -f "$tmp/protected" ]; then
+	while IFS= read -r -d '' p; do
+	    seen[$p]=1
+	done <"$tmp/protected"
+    fi
+    while IFS=$'\t' read -r events path; do
+	found=()
+	in_list "${path##*/}" "${TRIGGERS[@]}" && found+=("$path")
+	if [[ $events == *ISDIR* ]]; then
+	    # A new directory, or one moved in: inotifywait only watches
+	    # it once it exists, so what is created in it before is missed.
+	    mapfile -d '' -t -O "${#found[@]}" found < <(
+		find "$path" -mindepth 1 \( "${trigger_expr[@]}" \) \
+		     -prune -print0 2>/dev/null
+	    )
+	fi
+	for p in "${found[@]}"; do
+	    [ -n "${seen[$p]}" ] && continue
+	    seen[$p]=1
+	    report_trigger "$dir" "$p"
+	done
+    done
+}
+
+# start_watch DIR: watch DIR for new $TRIGGERS entries until the script
+# exits.  Sets $watch_pid and $watch_reader.  Returns once the watches
+# are set, so that nothing the sandbox creates is missed.
+start_watch() {
+    local dir=$1 exclude i
+    # The contents of .git and of the PRIVATE directories don't matter
+    # (your own builds there would only cost watches): only entries
+    # appearing in them.  The names only need their dots escaped.
+    exclude=$(printf '%s\n' .git "${PRIVATE[@]}" |
+		  sed 's/\./\\./g' | paste -sd '|')
+    mkfifo "$tmp/watch" || return
+    inotifywait -m -r -e create -e moved_to \
+		--exclude "/($exclude)/" --format $'%e\t%w%f' \
+		"$dir" >"$tmp/watch" 2>"$tmp/watch.log" 9>&- &
+    watch_pid=$!
+    watch_triggers "$dir" <"$tmp/watch" 9>&- &
+    watch_reader=$!
+    # inotifywait says so once all the watches are set; on a large tree
+    # it takes a while.
+    for ((i = 0; i < 300; i++)); do
+	grep -q '^Watches established' "$tmp/watch.log" && return
+	kill -0 "$watch_pid" 2>/dev/null || break
+	sleep 0.1
+    done
+    echo "Watching for new tool files failed or is slow: see $tmp/watch.log." >&2
+    grep -i -E 'error|failed|limit' "$tmp/watch.log" >&2
+}
+
 # The triggers in $1, as NUL-separated "path<TAB>latest change time of
 # their contents".  Change times (ctime), unlike modification times,
 # cannot be set back by the sandbox.
@@ -520,11 +609,17 @@ tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
 # that runs slirp4netns, so the EXIT trap knows what to kill.
 slirp=
 agent_pid=
+watch_pid=      # inotifywait, watching the work dir for new tool files
+watch_reader=   # the function reporting what it sees
 
 cleanup() {
     local links triggers p
     [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
     [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
+    if [ -n "$watch_pid" ]; then
+	kill "$watch_pid" 2>/dev/null
+	wait "$watch_reader" 2>/dev/null   # it ends with inotifywait's output
+    fi
     # Mount points bwrap created in your tree for absent PRIVATE entries.
     if [ -f "$tmp/created" ]; then
 	while IFS= read -r -d '' p; do
@@ -740,6 +835,15 @@ if [ -n "$work_path" ]; then
     # changes to the repos' config must not be reported.
     outside_symlinks "$work_path" | LC_ALL=C sort -z >"$tmp/symlinks.before"
     host_triggers "$work_path" | LC_ALL=C sort -z >"$tmp/triggers.before"
+
+    # Report new tool files as they appear, not only at exit.
+    if command -v inotifywait >/dev/null; then
+	start_watch "$work_path"
+	command -v notify-send >/dev/null ||
+	    echo "notify-send is missing: new tool files are only logged (e.g. 'apt install libnotify-bin')." >&2
+    else
+	echo "inotifywait is missing: new tool files are only reported at exit (e.g. 'apt install inotify-tools')." >&2
+    fi
 else
     # No work directory, e.g. to install packages or AI tools in $HOME.
     args+=(--chdir "$HOME")

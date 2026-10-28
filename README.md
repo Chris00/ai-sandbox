@@ -41,6 +41,13 @@ The script also checks the host side, before and after each session:
   work directory. It also asks if the work directory contains Unix
   sockets or named pipes: the sandbox could talk to the program behind
   a socket, bypassing the network firewall.
+- **During the session**, it watches the work directory, and as soon
+  as a file or directory that makes tools on the host run code appears
+  (`.envrc`, `.vscode/`, `.cargo/`, a new `.git` repo…), it shows a
+  desktop notification and logs it in `~/AI/warnings.log`, with the
+  time. That warns you before you use it, while you work in the project
+  alongside the agent. You may also see notifications for files you
+  create yourself: `ai` can't tell who created a file.
 - **At exit**, it reports new symlinks pointing out of the work
   directory, and files that make tools on the host run code that the
   agent may have created or changed: `.envrc`, `.vscode/`,
@@ -63,18 +70,34 @@ The script also checks the host side, before and after each session:
 - Python 3 with libseccomp's bindings (`python3-seccomp` on Debian
   and Ubuntu, `libseccomp-python` on Fedora)
 - for `--ssh`: OpenSSH ≥ 8.9 (destination-restricted keys)
+- for the warnings during the session (optional): `inotifywait`
+  (inotify-tools) and `notify-send` (libnotify). Without the first,
+  new tool files are only reported at exit; without the second, they
+  are only logged.
 
 On Debian or Ubuntu:
 
 ```sh
-sudo apt install bubblewrap slirp4netns util-linux nftables git python3-seccomp
+sudo apt install bubblewrap slirp4netns util-linux nftables git python3-seccomp \
+                 inotify-tools libnotify-bin
 ```
+
+On a very large work directory, watching it may hit the kernel's limit
+on inotify watches; `ai` then says so. Raise it with, for example,
+`sudo sysctl fs.inotify.max_user_watches=1048576` (and in
+`/etc/sysctl.d/` to keep it).
 
 
 ## Installation
 
 1. Copy `ai` to a directory in your `PATH`, e.g. `~/.local/bin`, and
-   make it executable.
+   make it executable, or link it there from your clone of this
+   repository. If you copy it, also install the icons that the
+   notifications use (otherwise they show a generic warning icon):
+
+   ```sh
+   install -Dm644 icons/ai-sandbox*.svg -t ~/.local/share/icons/hicolor/scalable/apps/
+   ```
 
 2. Create the agent's home and put in it only what the agent needs
    (shell configuration, the agent's own settings…):
@@ -217,7 +240,8 @@ protected, anywhere in the work directory, except `target/`, `.venv/`,
 as `Cargo.toml`, `pyproject.toml`, `package.json` or `.envrc` is there:
 the empty directory created for them in your tree is removed at exit.
 Entries the agent creates elsewhere during the session can't be
-protected, and are reported at exit. Symlinks are skipped.
+protected: they are reported as they appear, and again at exit.
+Symlinks are skipped.
 
 Inside the sandbox, Python keeps its bytecode in the agent's home
 (`PYTHONPYCACHEPREFIX`) rather than in `__pycache__` directories of
@@ -362,7 +386,7 @@ Without a systemd user session, `ai` runs without limits and says so.
 | `~/AI/work`          | the clones of your repositories' `.git`          |
 | `~/AI/shadow`        | the agent's private build output and environments |
 | `~/AI/locks`         | one lock per running session                     |
-| `~/AI/warnings.log`  | warnings from the checks at exit                 |
+| `~/AI/warnings.log`  | warnings from the checks during the session and at exit, with their time |
 | `~/.ssh/id_ed25519_ai` | the agent's SSH key (`--ssh`)                  |
 
 The paths are set at the top of the script.
