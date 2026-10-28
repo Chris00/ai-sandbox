@@ -199,6 +199,14 @@ rel_to_pwd() {
     esac
 }
 
+rel_to_home() {
+    case $1 in
+	"$HOME")   echo "~" ;;
+	"$HOME"/*) echo "~/${1#"$HOME"/}" ;;
+	*)         echo "$1" ;;  # not under $HOME
+    esac
+}
+
 # Where a .git symlink or gitfile ("gitdir: PATH") points to.
 git_link_target() {
     local f=$1 target
@@ -441,7 +449,8 @@ protect_repos() {
 	# The ".git" suffix keeps nested repos on separate mount points.
 	upstream="/upstream/$rel_home.git"
 
-	printf 'Git %s%s%s → %s\n' "$red" "$(rel_to_pwd "$repo")" "$normal" "$copy"
+	printf 'Git %s%s%s → %s\n' "$red" "$(rel_to_pwd "$repo")" "$normal" \
+	       "$(rel_to_home "$copy")"
 
 	# git config writes through symlinks and hard links: only
 	# touch a regular file with no other name.
@@ -612,7 +621,7 @@ protect_read_only() {
 	    n=$((n + 1))
 	done
 	if [ "$n" -eq 0 ]; then
-	    echo "--ro: nothing matches '$pat' in the work dir." >&2
+	    echo "--ro: nothing matches '$pat' in the current dir." >&2
 	elif [ "$n" -le 3 ]; then
 	    for p in "${found[@]}"; do
 		[ -L "$p" ] ||
