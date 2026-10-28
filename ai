@@ -106,6 +106,61 @@ die() {
     exit 1
 }
 
+usage() {
+    cat <<'EOF'
+Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
+
+Run an interactive shell, or COMMAND, for an AI agent in a sandbox: it
+gets its own home (~/AI/home) and the internet, but not the rest of
+your files, your local network, your SSH keys or your Git history, and
+its CPU, memory and processes are limited.
+
+Options:
+  -w, --work              Work in the current directory: mount it
+                          read-write at /work/PATH, PATH being its path
+                          relative to your home.  Its Git history and
+                          tool settings stay protected.  Without -w, the
+                          sandbox starts in the agent's home, e.g. to
+                          install tools.
+  --ro PATTERN...         Make what matches the patterns, up to the next
+  --read-only PATTERN...  option or "--", read-only (needs -w).  Without
+                          "/", a pattern matches names anywhere
+                          ('*.pdf'); with "/", paths ('docs/*.pdf');
+                          "." is the whole work directory.  Quote
+                          patterns to reach subdirectories.
+  --ssh                   Give the sandbox an SSH agent holding only
+                          ~/.ssh/id_ed25519_ai, usable on the hosts of
+                          AI_SSH_HOSTS (set in the script).
+  -h, --help              Show this help.
+  -- COMMAND [ARG...]     Run COMMAND instead of a shell.
+
+Resource limits, from the environment:
+  AI_MEMORY  memory (default: 50% of the RAM)
+  AI_SWAP    swap (default: half of the swap)
+  AI_CPUS    CPUs (default: half of them)
+  AI_TASKS   processes and threads (default: 1024)
+
+Examples:
+  ai -w                               a shell in the current directory
+  ai -w -- claude                     run an agent there
+  ai -w --ro '*.pdf' data/raw -- claude
+  AI_CPUS=2 ai -w
+
+To bring the agent's commits back, in your repository: git fetch ai.
+More in the README: https://github.com/Chris00/ai-sandbox
+EOF
+}
+
+# --help first: it needs neither the resource limits nor the checks.
+# Arguments after "--" belong to the command.
+for arg; do
+    case $arg in
+	--) break ;;
+	-h|--help) usage; exit 0 ;;
+    esac
+done
+unset arg
+
 # --- Resource limits ----------------------------------------------------
 #
 # The whole session (sandbox, slirp4netns, ssh-agent) runs in a systemd
@@ -173,10 +228,10 @@ while [[ $# -gt 0 ]]; do
 	    break
 	    ;;
 	-*)
-	    die "Unknown option $1"
+	    die "Unknown option $1 (see ai --help)."
 	    ;;
 	*)
-	    die "Unexpected \"$1\": put the command to run after \"--\"."
+	    die "Unexpected \"$1\": put the command to run after \"--\" (see ai --help)."
 	    ;;
     esac
 done

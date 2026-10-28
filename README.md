@@ -172,6 +172,7 @@ ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
   patterns read-only in the sandbox (see
   [Read-only files](#read-only-files)). Needs `-w`.
 - `--ssh`: give the sandbox an SSH agent holding only the agent's key.
+- `-h`, `--help`: show a summary of the options and the resource limits.
 - `-- COMMAND [ARG...]`: run `COMMAND` instead of an interactive shell.
   Everything after `--` is passed to it unchanged, options included:
   `ai -w -- ls -l`.
