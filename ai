@@ -540,10 +540,12 @@ protect_tool_files() {
 	    [ -e "$p" ] || mkdir -- "$p" || exit 1
 	    mkdir -p -- "$shadow_base/$rel" || exit 1
 	    args+=(--bind "$shadow_base/$rel" "$mount/$rel")
-	    echo "Private in the sandbox: $(rel_to_pwd "$p")" >&2
+	    printf "Private in the sandbox: %s%s%s\n" \
+		   "$red" "$(rel_to_pwd "$p")" "$normal" >&2
 	else
 	    args+=(--ro-bind "$p" "$mount/$rel")
-	    echo "Read-only in the sandbox: $(rel_to_pwd "$p")" >&2
+	    printf "Read-only in the sandbox: %s%s%s\n" \
+		   "$red" "$(rel_to_pwd "$p")" "$normal" >&2
 	fi
 	printf '%s\0' "$p" >>"$tmp/protected"
     done
@@ -613,10 +615,13 @@ protect_read_only() {
 	    echo "--ro: nothing matches '$pat' in the work dir." >&2
 	elif [ "$n" -le 3 ]; then
 	    for p in "${found[@]}"; do
-		[ -L "$p" ] || echo "Read-only in the sandbox: $(rel_to_pwd "$p")" >&2
+		[ -L "$p" ] ||
+		    printf 'Read-only in the sandbox: %s%s%s\n' \
+			   "$red" "$(rel_to_pwd "$p")" "$normal" >&2
 	    done
 	else
-	    echo "Read-only in the sandbox: $n entries matching '$pat'." >&2
+	    printf "Read-only in the sandbox: %s entries matching %s'%s'%s.\n" \
+		   "$n" "$red" "$pat" "$normal" >&2
 	fi
 	total=$((total + n))
     done
