@@ -7,6 +7,12 @@ The agent gets a working directory and a home of its own, and can reach
 the internet. It can't touch the rest of your files, your Git
 history, your local network, your SSH keys or the services running on
 your machine.
+Since AI agents can be manipulated by text they read,
+and such [prompt injections can't be reliably prevented in the agent
+itself](https://arxiv.org/abs/2605.17634), it limits what a manipulated
+agent can do rather than trusting it: your history and the rest of your
+system stay out of its reach.  It doesn't stop everything, notably
+sending data out (see [Limitations](#limitations)).
 
 ```console
 $ cd ~/software/project
@@ -486,3 +492,7 @@ untrusted code harmless.
   that matters.
 - **Public addresses.** Only private network ranges are blocked. Servers
   on public addresses, such as some company networks, remain reachable.
+- **Persistence between sessions.** `~/AI/home` is shared by all
+  projects and kept between sessions.  A manipulated agent could leave
+  something there (in its shell profile, its tools' configuration or
+  installed packages) that runs in later sessions, on other projects.
