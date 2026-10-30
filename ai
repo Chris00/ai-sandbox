@@ -305,20 +305,20 @@ confirm() {    # confirm QUESTION: true if the user answers yes
 # name changes the others.  Files whose names in $1 are all read-only
 # aren't reported.
 outside_hardlinks() {
-    find "$1" \( "${hidden[@]}" \) -prune -o -type f -links +1 -printf '%D:%i %n %p\0' |
-	awk 'BEGIN { RS = "\0" }
-	     FILENAME == ARGV[1] { if ($0 != "") ro[++nro] = $0; next }
-	     { k = $1; n[k] = $2; c[k]++
-	       path = substr($0, length($1) + length($2) + 3)
-	       for (i = 1; i <= nro; i++)
-		   if (path == ro[i] || index(path, ro[i] "/") == 1) break
-	       if (i <= nro) { if (!(k in r)) r[k] = path }
-	       else { w[k]++; if (!(k in p)) p[k] = path } }
-	     END { for (k in c)
-		       if (w[k] > 0 && c[k] < n[k]) print p[k]
-		       else if (w[k] > 0 && (k in r))
-			   print p[k] "  (same file as read-only " r[k] ")" }' \
-	    <([ ${#ro_paths[@]} -eq 0 ] || printf '%s\0' "${ro_paths[@]}") -
+    awk 'BEGIN { RS = "\0" }
+	 FILENAME == ARGV[1] { if ($0 != "") ro[++nro] = $0; next }
+	 { k = $1; n[k] = $2; c[k]++
+	   path = substr($0, length($1) + length($2) + 3)
+	   for (i = 1; i <= nro; i++)
+	       if (path == ro[i] || index(path, ro[i] "/") == 1) break
+	   if (i <= nro) { if (!(k in r)) r[k] = path }
+	   else { w[k]++; if (!(k in p)) p[k] = path } }
+	 END { for (k in c)
+	           if (w[k] > 0 && c[k] < n[k]) print p[k]
+	           else if (w[k] > 0 && (k in r))
+	    	   print p[k] "  (same file as read-only " r[k] ")" }' \
+    <([ ${#ro_paths[@]} -eq 0 ] || printf '%s\0' "${ro_paths[@]}") \
+    <(find "$1" \( "${hidden[@]}" \) -prune -o -type f -links +1 -printf '%D:%i %n %p\0')
 }
 
 # File systems mounted inside $1 (bwrap binds recursively).
