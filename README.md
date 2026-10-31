@@ -7,12 +7,21 @@ The agent gets a working directory and a home of its own, and can reach
 the internet. It can't touch the rest of your files, your Git
 history, your local network, your SSH keys or the services running on
 your machine.
-Since AI agents can be manipulated by text they read,
-and such [prompt injections can't be reliably prevented in the agent
-itself](https://arxiv.org/abs/2605.17634), it limits what a manipulated
-agent can do rather than trusting it: your history and the rest of your
-system stay out of its reach.  It doesn't stop everything, notably
-sending data out (see [Limitations](#limitations)).
+
+AI agents can be manipulated by text they read: a file, a web page or
+an issue can carry instructions the agent then follows.  Such *prompt
+injection* is the first risk of the [OWASP Top 10 for LLM Applications
+2026](https://genai.owasp.org/download/56857/?tmstv=1785822482)
+(LLM01:2026; see the [OWASP
+page](https://genai.owasp.org/resource/owasp-genai-llm-top-10-2026/)),
+and it [can't be reliably prevented in the agent
+itself](https://arxiv.org/abs/2605.17634).  So `ai` doesn't rely on the
+agent behaving: it limits what a manipulated agent can do, the concern
+of *Excessive Agency* (LLM03:2026, which [rose from sixth to
+third](https://cloudsecurityalliance.org/blog/2026/10/21/the-owasp-top-10-for-llm-applications-2026-what-changed-and-why-it-matters)
+in this edition).  Your history and the rest of your system stay out of
+its reach.  It doesn't stop everything, notably sending data out (see
+[Limitations](#limitations)).
 
 ```console
 $ cd ~/software/project
