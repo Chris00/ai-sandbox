@@ -75,8 +75,9 @@ The script also checks the host side, before and after each session:
 
 ## Requirements
 
-- Linux with unprivileged user namespaces, and a systemd user session
-  for the resource limits
+- Linux with unprivileged user namespaces, systemd (`systemd-escape`
+  names the projects' directories), and a systemd user session for
+  the resource limits
 - [bubblewrap](https://github.com/containers/bubblewrap) ≥ 0.8
   (`bwrap --disable-userns`)
 - [slirp4netns](https://github.com/rootless-containers/slirp4netns)
@@ -194,8 +195,14 @@ ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 
 For safety, `ai` refuses `/`, your whole home directory, hidden
 directories in your home, `~/AI` itself and `~/Personal` as work
-directories. Only one session at a time may use a given directory, or
-a directory containing or inside it.
+directories. Only one session at a time may use a given directory.
+
+`ai` keeps what it needs for each work directory, or *project*, in a
+directory of its own (see [Files](#files)).  Projects can't overlap:
+once `~/software/proj` is a project, `ai` refuses to start in
+`~/software/proj/sub` or in `~/software`, since a repository in both
+would get two clones.  Work in the existing project, or delete its
+directory in `~/AI/projects` to start afresh.
 
 
 ## Read-only files
@@ -239,8 +246,8 @@ build, but not change your files.
 ## Working with Git
 
 For every repository in the work directory, the sandbox sees a clone
-kept in `~/AI/work/<path relative to your home>` instead of your real
-`.git`. The working tree is shared, but the history isn't. Your real
+kept in the project's directory, under `git/` (see [Files](#files)),
+instead of your real `.git`. The working tree is shared, but the history isn't. Your real
 repository is visible read-only as the clone's `origin`, so
 `git fetch origin` inside the sandbox picks up your latest commits.
 
@@ -266,9 +273,7 @@ from the clone. The `ai` remote is configured to skip tags and to
 verify the objects it receives.
 
 Not handled: submodules and worktrees, whose `.git` is a file rather
-than a directory. `ai` lists them at startup. Repositories in a work
-directory outside your home aren't protected either, and `ai` warns
-about it.
+than a directory. `ai` lists them at startup.
 
 
 ## Tool files
@@ -282,7 +287,8 @@ which ones:
 
 - **`PRIVATE`** (build output and environments: `target/`, `.venv/`,
   `venv/`, `node_modules/`, `.direnv/`): the sandbox sees a private
-  directory instead, kept in `~/AI/shadow/<path>`. The agent builds and
+  directory instead, kept in the project's directory, under `shadow/`
+  (see [Files](#files)). The agent builds and
   installs there, and keeps its builds between sessions; yours stay
   untouched. The agent starts with an empty one, so it rebuilds or
   reinstalls once.
@@ -442,13 +448,26 @@ Without a systemd user session, `ai` runs without limits and says so.
 | Path                 | Contents                                         |
 |----------------------|--------------------------------------------------|
 | `~/AI/home`          | the agent's home directory                       |
-| `~/AI/work`          | the clones of your repositories' `.git`          |
-| `~/AI/shadow`        | the agent's private build output and environments |
+| `~/AI/projects/`     | one directory per project (see below)            |
 | `~/AI/locks`         | one lock per running session                     |
 | `~/AI/warnings.log`  | warnings from the checks during the session and at exit, with their time |
 | `~/.ssh/id_ed25519_ai` | the agent's SSH key (`--ssh`)                  |
 
 The paths are set at the top of the script.
+
+A project's directory is named after the project's path, escaped by
+`systemd-escape` so that two projects never nest (`~/software/proj`
+gives `home-you-software-proj`).  It holds:
+
+| Path      | Contents                                                       |
+|-----------|----------------------------------------------------------------|
+| `path`    | the project's path                                             |
+| `git/`    | the clones of the project's repositories, at their path in it  |
+| `shadow/` | the agent's private build output and environments              |
+
+Older versions of `ai` kept the clones in `~/AI/work` and the private
+directories in `~/AI/shadow`.  The first session in a project moves
+them to its directory, and updates the `ai` remote of its repositories.
 
 A few directories of the host are also available in the sandbox,
 read-only, so that the agent can compile your LaTeX documents:
@@ -466,7 +485,7 @@ under `~/texmf/tex/` (e.g. `~/texmf/tex/latex/mypackage/`), fonts under
 `~/texmf/fonts/`. To check that a file is found, run `kpsewhich
 myclass.cls` in the sandbox.
 
-`~/AI/home`, `~/AI/work` and `~/AI/shadow` are controlled by the agent. On the host,
+`~/AI/home` and `~/AI/projects` are controlled by the agent. On the host,
 treat them like a download from an unknown source: review files before
 opening them in an editor, entering the directories with a Git-aware
 prompt or running commands there.
@@ -484,7 +503,7 @@ untrusted code harmless.
 - **Code you run later.** The agent's changes land in your working
   tree. Review them before running the code, its build files or its CI
   configuration on the host.
-- **The agent's own directories.** `~/AI/home`, `~/AI/work` and `~/AI/shadow` are
+- **The agent's own directories.** `~/AI/home` and `~/AI/projects` are
   controlled by the agent, and the exit check doesn't scan them. On the
   host, treat them like the work tree (see [Files](#files)).
 - **The kernel.** All sandboxing relies on the Linux kernel, and a
