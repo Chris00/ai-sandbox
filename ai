@@ -109,10 +109,6 @@ declare -A PRIVATE_IF=(
     [node_modules]=package.json
     [.direnv]=.envrc
 )
-# Entries the agent creates during the session can't be protected: the
-# check at exit reports new and changed ones (and new repos).
-TRIGGERS=(.git "${PRIVATE[@]}" "${READONLY[@]}")
-
 # Files of the agent's home that make code run, or steer the agent, in
 # its later sessions: changes to them during a session are reported at
 # exit.  Paths relative to the home; "*" matches any characters,
@@ -136,6 +132,25 @@ HOME_TRIGGERS=(
 # for the $AI_SSH_KEY.  An empty list means that it is unrestricted
 # (it can be used anywhere it's accepted).
 AI_SSH_HOSTS=(github.com gitlab.com)
+
+# Environment variables of the sandbox, as NAME=value, besides the few
+# that ai sets (the environment is cleared, and these come last, so they
+# can replace them): AI_ENV in every session, AI_PROJECT_ENV in project
+# sessions only.  They reach bwrap through a pipe, not on its command
+# line, which every local user can read: they may hold secrets.
+AI_ENV=()
+AI_PROJECT_ENV=(
+    # Claude Code: update in the base home (ai without -w), for all
+    # projects.  An update in a project would only land in its layer of
+    # the home: a copy of the whole program.
+    DISABLE_AUTOUPDATER=1
+    # Github Copilot
+    COPILOT_AUTO_UPDATE=false
+)
+
+# Your configuration: a bash file, sourced after the defaults above,
+# which it can change (with "+=" to add to a list).
+AI_CONFIG="$HOME/AI/config"
 
 # safe STRING: STRING with its control characters, which could drive
 # your terminal, replaced by "?".  For what may come from the agent: the
@@ -181,7 +196,7 @@ Options:
                           patterns to reach subdirectories.
   --ssh                   Give the sandbox an SSH agent holding only
                           ~/.ssh/id_ed25519_ai, usable on the hosts of
-                          AI_SSH_HOSTS (set in the script).
+                          AI_SSH_HOSTS (changeable in ~/AI/config).
   --status                Show the project containing the current directory:
                           the agent's branches with commits not in
                           yours, the private copies, whether a session
@@ -217,6 +232,30 @@ for arg; do
     esac
 done
 unset arg
+
+# --- Configuration ------------------------------------------------------
+
+# Sourced, so it runs with your rights: refuse it if someone else could
+# have changed it.
+if [ -e "$AI_CONFIG" ]; then
+    perm=$(stat -L -c %a -- "$AI_CONFIG") || exit 1
+    [ -O "$AI_CONFIG" ] && (( (8#$perm & 8#022) == 0 )) ||
+	die "$AI_CONFIG must be yours, and writable by you only (chmod 600)."
+    # shellcheck source=/dev/null
+    . "$AI_CONFIG"
+    unset perm
+fi
+
+# Entries the agent creates during the session can't be protected: the
+# check at exit reports new and changed ones (and new repos).
+TRIGGERS=(.git "${PRIVATE[@]}" "${READONLY[@]}")
+
+for e in "${AI_ENV[@]}" "${AI_PROJECT_ENV[@]}"; do
+    # Only the name: the value may be a secret.
+    [[ $e =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] ||
+	die "AI_ENV and AI_PROJECT_ENV take NAME=value entries, not \"${e%%=*}...\"."
+done
+unset e
 
 # --- Resource limits ----------------------------------------------------
 #
@@ -1341,10 +1380,6 @@ if [ -n "$work_path" ]; then
     home_args=(
 	--overlay-src "$AIHOME"
 	--overlay "$project/home" "$project/home.work" "$HOME"
-	# Claude Code: update in the base home (ai without -w), for all
-	# projects.  An update here would only land in this project's
-	# changes, a copy of the whole program.
-	--setenv DISABLE_AUTOUPDATER 1
     )
 else
     home_args=(--bind "$AIHOME/" "$HOME/")
@@ -1547,8 +1582,18 @@ else
 fi
 home_snapshot "${home_watch[@]}" >"$tmp/home.before"
 
+# Your environment variables, as --setenv arguments that bwrap reads
+# from a pipe (--args 11), to keep them off its command line.  With
+# exec: a process substitution on bwrap's own line would also leave it
+# open as fd 63, into the sandbox.
+env_list=("${AI_ENV[@]}")
+[ -z "$work_path" ] || env_list+=("${AI_PROJECT_ENV[@]}")
+exec 11< <(for e in "${env_list[@]}"; do
+	       printf '%s\0' --setenv "${e%%=*}" "${e#*=}"
+	   done)
+
 # The block pipe is opened read-write: read-only would wait for a
 # writer, and slirp4netns only opens it once bwrap has started.
-/usr/bin/bwrap --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" "${cmd[@]}" \
+/usr/bin/bwrap --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" --args 11 "${cmd[@]}" \
 	       3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&-
 exit $?

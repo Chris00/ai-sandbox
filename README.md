@@ -168,8 +168,9 @@ on inotify watches; `ai` then says so. Raise it with, for example,
    ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_ai -C ai-agent
    ```
 
-   Then set `AI_SSH_HOSTS` at the top of the script to the hosts the
-   agent may use it on, and connect once to each of them from your
+   Then set `AI_SSH_HOSTS` in `~/AI/config` (see
+   [Configuration](#configuration)) to the hosts the agent may use it
+   on, and connect once to each of them from your
    normal session so that they are in your `~/.ssh/known_hosts`.
 
 
@@ -267,18 +268,25 @@ session without `-w` while project sessions run, and project sessions
 while it runs.
 
 For the same reason, Claude Code's automatic updates are turned off in
-projects (`DISABLE_AUTOUPDATER=1`): an update there would copy the
-whole new version into that project only. Update in a session without
-`-w`. Likewise, log the agent in from a session without `-w`, so that
-all projects see the credentials: a login, or credentials the agent
-refreshes, during a project session stays in that project.
+projects (`DISABLE_AUTOUPDATER=1`, in `AI_PROJECT_ENV`, see
+[Configuration](#configuration)): an update there would copy the whole
+new version into that project only. Update in a session without `-w`.
+
+Likewise, log the agent in from a session without `-w`, so that all
+projects see the credentials. But a login refreshes its credentials
+from time to time, and a refresh during a project session stays in
+that project, which may then need its own login. A long-lived token
+avoids this, since nothing is written back: for Claude Code, generate
+one with `claude setup-token` and give it to every session in
+`AI_ENV`.
 
 At exit, `ai` reports the files of the agent's home changed during the
 session that make code run, or steer the agent, in its later sessions:
 shell profiles, `~/.local/bin`, Git's and SSH's configuration, package
 managers' settings, Claude Code's settings (hooks, permissions), its
 instructions (`CLAUDE.md`, the projects' memory) and its program. The
-list, `HOME_TRIGGERS`, is at the top of the script. For example:
+list, `HOME_TRIGGERS`, can be extended in your
+[configuration](#configuration). For example:
 
 ```
 2026-11-01 14:31:30 Session in /home/you/software/proj:
@@ -374,8 +382,8 @@ Some files in a project make tools on your machine run code: when you
 build it, open it in an editor, or simply enter its directory. Since
 you may work in the project while the agent does, `ai` keeps the
 agent's hands off them for the whole session, rather than only
-reporting changes at the end. Two lists at the top of the script set
-which ones:
+reporting changes at the end. Two lists, which your
+[configuration](#configuration) can change, set which ones:
 
 - **`PRIVATE`** (build output and environments: `target/`, `.venv/`,
   `venv/`, `node_modules/`, `.direnv/`): the sandbox sees a private
@@ -415,8 +423,9 @@ sandbox. The agent can use the key while the session runs, but can't
 copy it, and the agent stops with the session. Your `known_hosts` is
 available read-only.
 
-The agent only uses the key for the hosts listed in `AI_SSH_HOSTS`, at
-the top of the script (`github.com` and `gitlab.com` by default):
+The agent only uses the key for the hosts listed in `AI_SSH_HOSTS`
+(`github.com` and `gitlab.com` by default), which you can set in your
+[configuration](#configuration):
 
 ```bash
 AI_SSH_HOSTS=(github.com gitlab.com git@codeberg.org)
@@ -535,17 +544,58 @@ sudo systemctl daemon-reload    # then log out and back in
 Without a systemd user session, `ai` runs without limits and says so.
 
 
+## Configuration
+
+`ai` reads `~/AI/config`, if it exists: a bash file, sourced after the
+defaults set at the top of the script. Since it runs with your rights,
+it must be yours and writable by you only. Make it readable by you
+only too if it holds secrets:
+
+```bash
+# ~/AI/config (chmod 600)
+
+# Environment variables, as NAME=value: AI_ENV for every session,
+# AI_PROJECT_ENV for project sessions (-w) only.
+AI_ENV=(
+    CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…    # from claude setup-token
+)
+AI_PROJECT_ENV+=(
+    # Add the equivalent of DISABLE_AUTOUPDATER for another agent.
+)
+
+HOME_TRIGGERS+=(.config/myagent)     # see The agent's home
+READONLY+=(.myrc)                    # see Tool files
+PRIVATE+=(_build)
+PRIVATE_IF[_build]=dune-project
+AI_SSH_HOSTS=(github.com)            # replaces the default list
+```
+
+Use `+=` to add to a list: `=` replaces it, defaults included. Other
+variables set at the top of the script can be changed the same way.
+The sandbox's environment is cleared, except for a few variables set by
+`ai` (`HOME`, `PATH`, `TERM`…); the variables of `AI_ENV` and
+`AI_PROJECT_ENV` come after them, so they can replace them. `ai` passes
+them to bwrap through a pipe rather than on its command line, which
+every local user can read with `ps`.
+
+The resource limits (see [Resource limits](#resource-limits)) can be
+set there too. Write them `: "${AI_CPUS:=4}"`, so that the environment
+still takes precedence (`AI_CPUS=2 ai -w`).
+
+
 ## Files
 
 | Path                 | Contents                                         |
 |----------------------|--------------------------------------------------|
 | `~/AI/home`          | the agent's home directory                       |
 | `~/AI/projects/`     | one directory per project (see below)            |
+| `~/AI/config`        | your configuration, optional (see [Configuration](#configuration)) |
 | `~/AI/locks`         | the locks of the running sessions                |
 | `~/AI/warnings.log`  | warnings from the checks during the session and at exit, with their time |
 | `~/.ssh/id_ed25519_ai` | the agent's SSH key (`--ssh`)                  |
 
-The paths are set at the top of the script.
+The paths are set at the top of the script, and can be changed in
+`~/AI/config`.
 
 A project's directory is named after the project's path, escaped by
 `systemd-escape` so that two projects never nest (`~/software/proj`
@@ -602,6 +652,12 @@ untrusted code harmless.
   API key), your TeX files in `~/texmf` and your real `.git` under
   `/upstream` (check that your remote URLs in `.git/config` contain no
   tokens).
+- **Your online accounts.** With a claude.ai login, Claude Code also
+  gets the connectors of your claude.ai account (Gmail, Google Drive,
+  Slack…, set at claude.ai/customize/connectors), which reach your data
+  online, out of the sandbox's control. A token from `claude
+  setup-token` or an API key in `AI_ENV` doesn't load them (see
+  [Configuration](#configuration)).
 - **Code you run later.** The agent's changes land in your working
   tree. Review them before running the code, its build files or its CI
   configuration on the host.
