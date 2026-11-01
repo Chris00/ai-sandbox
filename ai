@@ -172,17 +172,23 @@ AI_PROJECT_ENV=(
 # which it can change (with "+=" to add to a list).
 AI_CONFIG="$HOME/AI/config"
 
-# safe STRING: STRING with its control characters, which could drive
-# your terminal, replaced by "?".  For what may come from the agent: the
-# names of files in the work dir, for one, so for every path shown.
+# safe STRING, safe_text: STRING, or the text read, with the control
+# characters, which could drive your terminal, replaced by "?"; but
+# safe_text keeps tabs and newlines.  For what may come from the agent:
+# the names of files in the work dir, for one, so for every path shown.
+# (LC_ALL=C: bytes, which leaves UTF-8 characters alone.)
 safe() {
-    local LC_ALL=C              # bytes: leave UTF-8 characters alone
+    local LC_ALL=C
     printf '%s' "${1//[[:cntrl:]]/?}"
 }
 
-# indent: show the lines read, made `safe`, indented.
+safe_text() {
+    LC_ALL=C sed 's/[\x01-\x08\x0b-\x1f\x7f]/?/g'
+}
+
+# indent: show the lines read, made safe, indented.
 indent() {
-    LC_ALL=C sed 's/[[:cntrl:]]/?/g; s/^/  /'
+    safe_text | sed 's/^/  /'
 }
 
 die() {
@@ -1317,12 +1323,6 @@ for d in dirs:
 EOF
 }
 
-# show_text: what is read, with the control characters but tabs and
-# newlines replaced by "?": it comes from the agent.
-show_text() {
-    LC_ALL=C sed 's/[\x01-\x08\x0b-\x1f\x7f]/?/g'
-}
-
 # promote PATH...: make the project's version of each PATH of the agent's
 # home (a file, a symlink, a deletion, or a directory of them) the base
 # version, for every project, after showing the changes and asking.
@@ -1379,7 +1379,7 @@ promote() {
 	    [ -f "$t" ] && [ ! -L "$t" ] && old=$t
 	    diff -u --label "base ~/$rel" --label "project ~/$rel" -- "$old" "$f"
 	fi
-    done | show_text
+    done | safe_text
     confirm "Make this the base version, for every project?" || exit 1
 
     for f in "${ops[@]}"; do
