@@ -180,6 +180,7 @@ on inotify watches; `ai` then says so. Raise it with, for example,
 ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 ai --status
 ai --promote PATH...
+ai --reset | --forget
 ```
 
 - `-w`, `--work`: make the current directory the work directory: it is
@@ -204,6 +205,9 @@ ai --promote PATH...
 - `--promote PATH...`: make the project's version of files of the
   agent's home the base version, for every project (see
   [Promoting a change](#promoting-a-change)).
+- `--reset`, `--forget`: delete the project's changes to the agent's
+  home, or everything `ai` keeps for the project (see
+  [Starting afresh](#starting-afresh)).
 - `-h`, `--help`: show a summary of the options and the resource limits.
 - `-- COMMAND [ARG...]`: run `COMMAND` instead of an interactive shell.
   Everything after `--` is passed to it unchanged, options included:
@@ -217,8 +221,27 @@ directories. Only one session at a time may use a given directory.
 directory of its own (see [Files](#files)).  Projects can't overlap:
 once `~/software/proj` is a project, `ai` refuses to start in
 `~/software/proj/sub` or in `~/software`, since a repository in both
-would get two clones.  Work in the existing project, or delete its
-directory in `~/AI/projects` to start afresh (see [Files](#files)).
+would get two clones.  Work in the existing project, or forget it to
+start afresh (see [Starting afresh](#starting-afresh)).
+
+### Starting afresh
+
+Two commands, run in a project's directory or below it, delete what
+`ai` keeps for it, after showing it and asking:
+
+- `ai --reset` deletes the project's changes to the agent's home (see
+  [The agent's home](#the-agents-home)): its history, memory, caches,
+  settings changed there… The project then sees the base home as it
+  is. Promote first what you want to keep.
+- `ai --forget` deletes the whole project's directory: the clones of
+  its repositories, the private build directories and the changes to
+  the agent's home. It also removes the `ai` remote of its
+  repositories, with the `ai/…` branches fetched from it. It warns
+  when the agent's branches have commits in none of yours: they would
+  be lost, so fetch and merge them first, or make branches of them.
+  The next session in the directory starts a new project.
+
+Both refuse to run during a session in the project.
 
 ### Status
 
@@ -661,11 +684,13 @@ gives `home-you-software-proj`).  It holds:
 | `home/`   | the project's changes to the agent's home (the overlay's upper layer) |
 | `home.work/` | overlayfs's work directory                                  |
 
-Overlayfs leaves an unreadable directory in `home.work/`. To delete a
-project's directory by hand, make it readable first:
+`ai --forget` deletes a project's directory (see
+[Starting afresh](#starting-afresh)). To do it by hand, for a project
+whose directory no longer exists, say, make it writable first:
+overlayfs leaves an unreadable directory in `home.work/`:
 
 ```sh
-chmod -R u+rwx ~/AI/projects/home-you-software-proj/home.work
+chmod -R u+rwx ~/AI/projects/home-you-software-proj
 rm -rf ~/AI/projects/home-you-software-proj
 ```
 

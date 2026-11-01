@@ -6,6 +6,7 @@
 # Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 #        ai --status
 #        ai --promote PATH...
+#        ai --reset | --forget
 #
 # Without COMMAND, run an interactive shell.  Without -w, the sandbox
 # starts in the agent's home, e.g. to install tools: its changes there
@@ -51,7 +52,9 @@
 # private copies and whether a session is running.
 #
 # --promote PATH... makes the project's version of files of the agent's
-# home the base version, for every project.
+# home the base version, for every project.  --reset deletes the
+# project's changes to the agent's home, --forget everything ai keeps
+# for the project.
 
 # The base $HOME/AI is protected below.
 AIHOME="$HOME/AI/home"
@@ -180,6 +183,7 @@ usage() {
 Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
        ai --status
        ai --promote PATH...
+       ai --reset | --forget
 
 Run an interactive shell, or COMMAND, for an AI agent in a sandbox: it
 gets its own home (~/AI/home) and the internet, but not the rest of
@@ -210,6 +214,11 @@ Options:
   --promote PATH...       In a project, make its version of these files
                           of the agent's home (~/.bashrc...) the base
                           one, for every project, after showing it.
+  --reset                 Delete the project's changes to the agent's
+                          home (history, memory...), after asking.
+  --forget                Delete everything ai keeps for the project
+                          (clones, private copies, home changes) and the
+                          "ai" remote of its repositories, after asking.
   -h, --help              Show this help.
   -- COMMAND [ARG...]     Run COMMAND instead of a shell.
 
@@ -230,15 +239,15 @@ More in the README: https://github.com/Chris00/ai-sandbox
 EOF
 }
 
-# --help, --status and --promote first: they need neither the resource
-# limits nor the checks.  Arguments after "--" belong to the command.
-action=                                 # status or promote
+# --help and the commands on projects first: they need neither the
+# resource limits nor the checks.  Arguments after "--" belong to the
+# command.
+action=                                 # status, promote, reset or forget
 for arg; do
     case $arg in
 	--) break ;;
 	-h|--help) usage; exit 0 ;;
-	--status) action=status ;;
-	--promote) action=promote ;;
+	--status|--promote|--reset|--forget) action=${arg#--} ;;
     esac
 done
 unset arg
@@ -312,7 +321,7 @@ while [[ $# -gt 0 ]]; do
 	    ssh=1
 	    shift
 	    ;;
-	--status)
+	--status|--reset|--forget)
 	    shift                       # $action is already set
 	    ;;
 	--promote)
@@ -1085,6 +1094,37 @@ find_project() {
     printf '%s' "$d"
 }
 
+# show_home_layer LAYER: the changes in LAYER, a project's layer of the
+# agent's home, summed up two levels down (.claude/projects/...), if
+# any.  Overlayfs records deletions as whiteouts: character devices.
+show_home_layer() {
+    local layer=$1
+    if [ -n "$(find "$layer" -mindepth 1 ! -type d -print -quit 2>/dev/null)" ]; then
+	# 2>/dev/null: the agent may leave unreadable directories.
+	echo "Home layer: $(du -sh -- "$layer" 2>/dev/null | cut -f1), changes to the agent's home:"
+	find "$layer" -mindepth 1 \( -type c -printf 'd %P\0' -o \
+	     ! -type d -printf 'f %P\0' \) 2>/dev/null |
+	    LC_ALL=C sort -z -k2 |
+	    LC_ALL=C sed -z 's/[[:cntrl:]]/?/g' |
+	    awk 'BEGIN { RS = "\0" }
+	         { path = substr($0, 3)
+	           if (split(path, c, "/") <= 2) {
+	               key = path; deleted[key] = (substr($0, 1, 1) == "d")
+	           } else {
+	               key = c[1] "/" c[2] "/"; files[key]++
+	           }
+	           if (!(key in seen)) { seen[key] = 1; order[++k] = key } }
+	         END { for (i = 1; i <= k; i++) {
+	                   key = order[i]
+	                   if (key in files)
+	                       printf "  %s (%d file%s)\n", key, files[key],
+	                              (files[key] > 1 ? "s" : "")
+	                   else
+	                       printf "  %s%s\n", key, deleted[key] ? ": deleted" : ""
+	               } }'
+    fi
+}
+
 # show_status: what ai keeps for the project containing the current
 # directory (the project root may be a super-directory), if any.  The
 # branch names and paths it shows go through `safe`: they come from the
@@ -1092,6 +1132,7 @@ find_project() {
 show_status() {
     local dir project lock g copy rel repo heads line sha name n p size
     local -a clones copies expr
+    unmerged=0
     dir=$(find_project "$(realpath -e -- .)") ||
 	die "No project here: ai -w makes the current directory one."
     project=$(project_dir "$dir")
@@ -1141,37 +1182,13 @@ show_status() {
 	    [ $((n++)) -eq 0 ] &&
 		printf "Repo %s%s%s:\n" "$red" "$rel" "$normal"
 	    echo "  $name: $line"
+	    unmerged=$((unmerged + 1))
 	done <<<"$heads"
 	[ "$n" -eq 0 ] && printf "Repo %s%s%s: nothing left to merge\n" \
 				 "$red" "$rel" "$normal"
     done
 
-    # The project's changes to the agent's home, summed up two levels
-    # down (.claude/projects/...).  Overlayfs records deletions as
-    # whiteouts: character devices.
-    if [ -n "$(find "$project/home" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-	echo "Home layer: $(du -sh -- "$project/home" | cut -f1), changes to the agent's home:"
-	find "$project/home" -mindepth 1 \( -type c -printf 'd %P\0' -o \
-	     ! -type d -printf 'f %P\0' \) |
-	    LC_ALL=C sort -z -k2 |
-	    LC_ALL=C sed -z 's/[[:cntrl:]]/?/g' |
-	    awk 'BEGIN { RS = "\0" }
-	         { path = substr($0, 3)
-	           if (split(path, c, "/") <= 2) {
-	               key = path; deleted[key] = (substr($0, 1, 1) == "d")
-	           } else {
-	               key = c[1] "/" c[2] "/"; files[key]++
-	           }
-	           if (!(key in seen)) { seen[key] = 1; order[++k] = key } }
-	         END { for (i = 1; i <= k; i++) {
-	                   key = order[i]
-	                   if (key in files)
-	                       printf "  %s (%d file%s)\n", key, files[key],
-	                              (files[key] > 1 ? "s" : "")
-	                   else
-	                       printf "  %s%s\n", key, deleted[key] ? ": deleted" : ""
-	               } }'
-    fi
+    show_home_layer "$project/home"
 
     # The private copies: at their path in the project, within shadow/.
     for n in "${PRIVATE[@]}"; do
@@ -1328,9 +1345,74 @@ promote() {
     done
 }
 
+# remove_tree DIR: delete DIR, a directory of ai's.  Make it writable
+# first: overlayfs leaves its work directory unreadable, and the agent
+# can do the same in its private copies.  chmod -R doesn't follow the
+# symlinks it meets, nor rm -r.
+remove_tree() {
+    chmod -R u+rwx -- "$1" 2>/dev/null
+    rm -rf -- "$1"
+}
+
+# reset_home: delete the project's layer of the agent's home, after
+# showing it and asking: the project then sees the base home as it is.
+reset_home() {
+    local dir project
+    dir=$(find_project "$(realpath -e -- .)") ||
+	die "No project here: run ai --reset in the project."
+    project=$(project_dir "$dir")
+    [ -e "$project/home" ] ||
+	die "The agent's home has no changes in this project."
+    # No session in the project meanwhile, until the script exits.
+    lock_work_path "$dir"
+    show_home_layer "$project/home"
+    confirm "Delete the project's changes to the agent's home (its history, memory, settings... there)?" ||
+	exit 1
+    remove_tree "$project/home.work"
+    remove_tree "$project/home"
+    echo "The agent's home in $(rel_to_home "$dir") is now the base home."
+}
+
+# forget: delete what ai keeps for the project, after showing it and
+# asking, and the "ai" remote of its repos.
+forget() {
+    local dir project g url
+    local -a repos
+    dir=$(find_project "$(realpath -e -- .)") ||
+	die "No project here: run ai --forget in the project."
+    project=$(project_dir "$dir")
+    show_status                 # sets $unmerged
+    # No session in the project meanwhile, until the script exits.
+    lock_work_path "$dir"
+    if [ "$unmerged" -gt 0 ]; then
+	echo "The agent's commits listed above are in no branch of yours: deleting the" >&2
+	echo "clones and the ai remote loses them.  Fetch and merge them first, or make" >&2
+	echo "branches of them (git branch NAME ai/BRANCH, after git fetch ai)." >&2
+    fi
+    confirm "Delete $(rel_to_home "$project"), and the ai remote of the project's repos?" ||
+	exit 1
+
+    # Only the remotes leading to this project's clones.
+    mapfile -d '' -t repos < <(git_repos "$dir")
+    for g in "${repos[@]}"; do
+	url=$(/usr/bin/git config --file "$g/config" remote.ai.url)
+	case $url in
+	    "$project/git"|"$project/git"/*)
+		check_plain_config "$g"
+		git -C "${g%/.git}" remote remove ai &&
+		    echo "Repo $(rel_to_pwd "${g%/.git}"): ai remote removed."
+		;;
+	esac
+    done
+    remove_tree "$project"
+    echo "Forgot $(rel_to_home "$dir")."
+}
+
 case $action in
     status)  show_status; exit ;;
     promote) promote "${promote_paths[@]}"; exit ;;
+    reset)   reset_home; exit ;;
+    forget)  forget; exit ;;
 esac
 
 # --- Checks -------------------------------------------------------------
