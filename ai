@@ -5,6 +5,7 @@
 #
 # Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 #        ai --status
+#        ai --promote PATH...
 #
 # Without COMMAND, run an interactive shell.  Without -w, the sandbox
 # starts in the agent's home, e.g. to install tools: its changes there
@@ -48,6 +49,9 @@
 # --status shows what ai keeps for the project containing the current
 # directory: the agent's branches with commits not in yours, the
 # private copies and whether a session is running.
+#
+# --promote PATH... makes the project's version of files of the agent's
+# home the base version, for every project.
 
 # The base $HOME/AI is protected below.
 AIHOME="$HOME/AI/home"
@@ -175,6 +179,7 @@ usage() {
     cat <<'EOF'
 Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
        ai --status
+       ai --promote PATH...
 
 Run an interactive shell, or COMMAND, for an AI agent in a sandbox: it
 gets its own home (~/AI/home) and the internet, but not the rest of
@@ -202,6 +207,9 @@ Options:
                           the agent's branches with commits not in
                           yours, the private copies, whether a session
                           is running.
+  --promote PATH...       In a project, make its version of these files
+                          of the agent's home (~/.bashrc...) the base
+                          one, for every project, after showing it.
   -h, --help              Show this help.
   -- COMMAND [ARG...]     Run COMMAND instead of a shell.
 
@@ -222,14 +230,15 @@ More in the README: https://github.com/Chris00/ai-sandbox
 EOF
 }
 
-# --help and --status first: they need neither the resource limits nor
-# the checks.  Arguments after "--" belong to the command.
-status=
+# --help, --status and --promote first: they need neither the resource
+# limits nor the checks.  Arguments after "--" belong to the command.
+action=                                 # status or promote
 for arg; do
     case $arg in
 	--) break ;;
 	-h|--help) usage; exit 0 ;;
-	--status) status=1 ;;
+	--status) action=status ;;
+	--promote) action=promote ;;
     esac
 done
 unset arg
@@ -270,7 +279,7 @@ AI_TASKS=${AI_TASKS:-1024}              # processes and threads
 [[ $AI_CPUS =~ ^[1-9][0-9]*$ && $AI_TASKS =~ ^[1-9][0-9]*$ ]] ||
     die "AI_CPUS and AI_TASKS must be positive integers."
 
-if [ -z "$AI_IN_SCOPE" ] && [ -z "$status" ]; then
+if [ -z "$AI_IN_SCOPE" ] && [ -z "$action" ]; then
     if systemctl --user show-environment >/dev/null 2>&1; then
 	AI_IN_SCOPE=1 exec systemd-run --user --scope --quiet \
 	    --description="AI sandbox" \
@@ -304,7 +313,13 @@ while [[ $# -gt 0 ]]; do
 	    shift
 	    ;;
 	--status)
-	    shift                       # $status is already set
+	    shift                       # $action is already set
+	    ;;
+	--promote)
+	    shift
+	    promote_paths=("$@")
+	    [ $# -gt 0 ] || die "--promote needs the paths to promote."
+	    break
 	    ;;
 	--ro|--read-only)
 	    # All the patterns up to the next option or "--": an unquoted
@@ -335,8 +350,8 @@ while [[ $# -gt 0 ]]; do
 	    ;;
     esac
 done
-if [ -n "$status" ] && [ -n "$work_path$ssh${read_only[*]}${cmd[*]}" ]; then
-    die "--status takes no other option."
+if [ -n "$action" ] && [ -n "$work_path$ssh${read_only[*]}${cmd[*]}" ]; then
+    die "--$action takes no other option."
 fi
 
 # --- Helpers ------------------------------------------------------------
@@ -632,6 +647,8 @@ home_changes() {
     fi
     printf '%s\n' "${found[@]}" | indent
     [ "$n" -eq 0 ] || echo "  and $n other files (ai --status lists the project's changes)."
+    [ -z "$work_path" ] ||
+	echo "Once reviewed, ai --promote PATH in the project makes one the base version."
 }
 
 # Entries printed now by "$@" that are not in the snapshot file $1,
@@ -1176,10 +1193,144 @@ show_status() {
     done
 }
 
-if [ -n "$status" ]; then
-    show_status
-    exit
-fi
+# home_rel PATH: PATH, a file of the agent's home (~/.bashrc, .bashrc),
+# relative to the home.
+home_rel() {
+    local p=$1
+    case $p in
+	"~/"*)     p=${p#"~/"} ;;
+	"$HOME"/*) p=${p#"$HOME"/} ;;
+	/*)        die "$p is not in the agent's home." ;;
+    esac
+    p=${p#./}
+    p=${p%/}
+    [[ -n $p && $p != . && /$p/ != */../* ]] ||
+	die "Not a file of the agent's home: $1"
+    printf '%s' "$p"
+}
+
+# under DIR PATH: true if PATH, its symlinks resolved, is DIR (a
+# `realpath`) or in it.
+under() {
+    local real
+    real=$(realpath -m -- "$2") || return 1
+    [[ $real == "$1" || $real == "$1"/* ]]
+}
+
+# is_whiteout PATH: true if PATH, in a layer, records a deletion.
+is_whiteout() {
+    [ -c "$1" ] && [ "$(stat -c %t:%T -- "$1")" = 0:0 ]
+}
+
+# opaque_dirs LAYER REL: the directories that the layer LAYER marks
+# opaque among those leading to REL, and in REL: they replace the base's
+# directory as a whole, since the agent deleted it, then created it
+# again.  Promoting part of one would mix the two versions.
+opaque_dirs() {
+    python3 -I - "$1" "$2" <<'EOF'
+import os, sys
+layer, rel = sys.argv[1], sys.argv[2]
+
+def opaque(d):
+    try:
+        return os.getxattr(d, "user.overlay.opaque", follow_symlinks=False) == b"y"
+    except OSError:
+        return False
+
+parts = rel.split("/")
+dirs = [os.path.join(layer, *parts[:i]) for i in range(1, len(parts))]
+target = os.path.join(layer, rel)
+if os.path.isdir(target) and not os.path.islink(target):
+    dirs += [root for root, _, _ in os.walk(target)]
+for d in dirs:
+    if opaque(d):
+        print(d)
+EOF
+}
+
+# show_text: what is read, with the control characters but tabs and
+# newlines replaced by "?": it comes from the agent.
+show_text() {
+    LC_ALL=C sed 's/[\x01-\x08\x0b-\x1f\x7f]/?/g'
+}
+
+# promote PATH...: make the project's version of each PATH of the agent's
+# home (a file, a symlink, a deletion, or a directory of them) the base
+# version, for every project, after showing the changes and asking.
+# Each is then dropped from the project's layer, which sees the base
+# version again.  Nothing may run meanwhile: the base home must not
+# change under a session, nor a project's layer.
+promote() {
+    local dir project layer base p rel src f t old
+    local -a ops=()
+    lock_home exclusive
+    dir=$(find_project "$(realpath -e -- .)") ||
+	die "No project here: run ai --promote in the project."
+    project=$(project_dir "$dir")
+    layer=$(realpath -e -- "$project/home" 2>/dev/null) ||
+	die "The agent's home has no changes in this project."
+    base=$(realpath -e -- "$AIHOME") || exit 1
+
+    for p; do
+	rel=$(home_rel "$p") || exit 1
+	src="$layer/$rel"
+	[ -e "$src" ] || [ -L "$src" ] ||
+	    die "~/$rel has no changes in this project (see ai --status)."
+	under "$layer" "$(dirname -- "$src")" ||
+	    die "~/$rel: its directory, in the project's layer, leads out of it."
+	[ -z "$(opaque_dirs "$layer" "$rel")" ] ||
+	    die "~/$rel: the project replaced a directory there as a whole (deleted, then created again), which can't be merged into the base home: copy what you need by hand."
+	if [ -d "$src" ] && [ ! -L "$src" ]; then
+	    mapfile -d '' -t -O "${#ops[@]}" ops < <(
+		find "$src" ! -type d -print0 | LC_ALL=C sort -z
+	    )
+	else
+	    ops+=("$src")
+	fi
+    done
+    for f in "${ops[@]}"; do
+	rel=${f#"$layer"/}
+	# A symlink planted in the base home must not lead the copy out.
+	under "$base" "$(dirname -- "$base/$rel")" ||
+	    die "~/AI/home/$rel: its directory leads out of the base home."
+	is_whiteout "$f" || [ -L "$f" ] || [ -f "$f" ] ||
+	    die "~/$rel is not a file, a symlink or a deletion."
+    done
+    [ ${#ops[@]} -gt 0 ] || die "Nothing to promote."
+
+    for f in "${ops[@]}"; do
+	rel=${f#"$layer"/}
+	t="$base/$rel"
+	if is_whiteout "$f"; then
+	    echo "Delete ~/$rel"
+	elif [ -L "$f" ]; then
+	    echo "Symlink ~/$rel → $(readlink -- "$f")"
+	else
+	    old=/dev/null
+	    [ -f "$t" ] && [ ! -L "$t" ] && old=$t
+	    diff -u --label "base ~/$rel" --label "project ~/$rel" -- "$old" "$f"
+	fi
+    done | show_text
+    confirm "Make this the base version, for every project?" || exit 1
+
+    for f in "${ops[@]}"; do
+	rel=${f#"$layer"/}
+	t="$base/$rel"
+	# rm first: cp would write through a symlink there.
+	rm -rf -- "$t" || exit 1
+	if ! is_whiteout "$f"; then
+	    mkdir -p -- "$(dirname -- "$t")" &&
+		cp -P --preserve=mode,timestamps -- "$f" "$t" || exit 1
+	fi
+	rm -f -- "$f"
+	echo "Promoted ~/$(safe "$rel")."
+    done
+}
+
+case $action in
+    status)  show_status; exit ;;
+    promote) promote "${promote_paths[@]}"; exit ;;
+esac
 
 # --- Checks -------------------------------------------------------------
 

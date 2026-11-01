@@ -179,6 +179,7 @@ on inotify watches; `ai` then says so. Raise it with, for example,
 ```
 ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 ai --status
+ai --promote PATH...
 ```
 
 - `-w`, `--work`: make the current directory the work directory: it is
@@ -200,6 +201,9 @@ ai --status
 - `--ssh`: give the sandbox an SSH agent holding only the agent's key.
 - `--status`: show what `ai` keeps for the project containing the
   current directory (see [Status](#status)).
+- `--promote PATH...`: make the project's version of files of the
+  agent's home the base version, for every project (see
+  [Promoting a change](#promoting-a-change)).
 - `-h`, `--help`: show a summary of the options and the resource limits.
 - `-- COMMAND [ARG...]`: run `COMMAND` instead of an interactive shell.
   Everything after `--` is passed to it unchanged, options included:
@@ -316,14 +320,41 @@ Changed in the agent's home, in this project only (in ~/AI/projects/home-you-sof
   .claude/settings.json (deleted)
   .claude/projects/-work-software-proj/memory/MEMORY.md
   and 12 other files (ai --status lists the project's changes).
+Once reviewed, ai --promote PATH in the project makes one the base version.
 ```
 
 In a project, the change is in its `home/`: review it there, and
-delete the file to go back to the base version. After a session without
+delete the file to go back to the base version, or promote it (see
+below). After a session without
 `-w`, the report covers these files in the base home, which every
 project sees. Claude Code's `~/.claude.json`, which holds its MCP
 servers, isn't in the list: Claude Code rewrites it at every start, so
 it would always be reported.
+
+### Promoting a change
+
+A change made in a project, such as a skill the agent wrote or a
+setting you adjusted there, may be worth having in every project.
+`ai --promote` copies it to the base home, in the project's directory:
+
+```sh
+cd ~/software/proj
+ai --promote ~/.claude/skills/review ~/.bashrc
+```
+
+Each path is a file of the agent's home, written `~/…` or relative to
+it. It may be a file, a symlink, a deletion (the base's file is then
+deleted), or a directory, for all the changes in it. `ai` first shows
+each change, as a diff against the base version, and asks before
+copying. The promoted files then leave the project's layer, so the
+project sees the base version, now the same, and follows it again.
+
+A promoted file runs, or steers the agent, in every project: review it
+as code from an unknown source. Promoting needs that no session runs,
+since the base home must not change under one. `ai` refuses a symlink
+of the base home that would lead the copy out of it, and a directory
+that the project deleted and created again, which replaces the base's
+as a whole: copy what you need from it by hand.
 
 
 ## Read-only files
