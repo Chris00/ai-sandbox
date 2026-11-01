@@ -7,7 +7,8 @@
 #        ai --status
 #
 # Without COMMAND, run an interactive shell.  Without -w, the sandbox
-# starts in the agent's home, e.g. to install tools.
+# starts in the agent's home, e.g. to install tools: its changes there
+# are seen by every project.
 #
 # With -w, the current directory is the work directory, or project: it
 # is mounted read-write at /work/PATH, where PATH is its path relative
@@ -29,6 +30,11 @@
 # them or run Git commands inside them: their configuration and hooks
 # are under the AI's control.
 #
+# In a project, the agent's home is an overlay: the base home ($AIHOME)
+# read-only, and the project's own changes on top, kept in its
+# directory.  What the agent leaves in its home (history, memory,
+# settings...) thus stays in the project.
+#
 # --ro PATTERN... (or --read-only) makes what matches the PATTERNs, up
 # to the next option or "--", read-only in the sandbox.  Without a "/",
 # a PATTERN matches names anywhere in the work dir (e.g. '*.pdf'); with
@@ -46,7 +52,9 @@ AIHOME="$HOME/AI/home"
 # One directory per project, named after the project's path.  It holds:
 #   path    the project's path;
 #   git/    the clones of its Git repos, at their path in the project;
-#   shadow/ the private copies of its $PRIVATE directories.
+#   shadow/ the private copies of its $PRIVATE directories;
+#   home/   its changes to the agent's home (the overlay's upper layer);
+#   home.work/  the overlay's work directory.
 PROJECTS="$HOME/AI/projects"
 AI_SSH_KEY="$HOME/.ssh/id_ed25519_ai"
 
@@ -129,9 +137,10 @@ Options:
   -w, --work              Work in the current directory: mount it
                           read-write at /work/PATH, PATH being its path
                           relative to your home.  Its Git history and
-                          tool settings stay protected.  Without -w, the
-                          sandbox starts in the agent's home, e.g. to
-                          install tools.
+                          tool settings stay protected, and the agent's
+                          changes to its home stay in the project.
+                          Without -w, the sandbox starts in the agent's
+                          home, e.g. to install tools for all projects.
   --ro PATTERN...         Make what matches the patterns, up to the next
   --read-only PATTERN...  option or "--", read-only (needs -w).  Without
                           "/", a pattern matches names anywhere
@@ -453,9 +462,9 @@ start_watch() {
     mkfifo "$tmp/watch" || return
     inotifywait -m -r -e create -e moved_to \
 		--exclude "/($exclude)/" --format $'%e\t%w%f' \
-		"$dir" >"$tmp/watch" 2>"$tmp/watch.log" 9>&- &
+		"$dir" >"$tmp/watch" 2>"$tmp/watch.log" 7>&- 9>&- &
     watch_pid=$!
-    watch_triggers "$dir" <"$tmp/watch" 9>&- &
+    watch_triggers "$dir" <"$tmp/watch" 7>&- 9>&- &
     watch_reader=$!
     # inotifywait says so once all the watches are set; on a large tree
     # it takes a while.
@@ -894,6 +903,23 @@ lock_work_path() {
     exec 8>&-                      # release the global lock
 }
 
+# lock_home MODE: take the lock of the agent's base home, $AIHOME, in
+# MODE "shared" for a project session, which sees it as the lower layer
+# of its overlay, or "exclusive" for a session in it (without -w): a
+# lower layer must not change while it is mounted.  Held on file
+# descriptor 7 until the script exits.
+lock_home() {
+    mkdir -p -- "$LOCKDIR" || exit 1
+    exec 7>"$LOCKDIR/home.lock"
+    if [ "$1" = shared ]; then
+	flock -n -s 7 ||
+	    die "A session in the agent's home (ai without -w) is running: end it first."
+    else
+	flock -n -x 7 ||
+	    die "Project sessions are running, and the agent's home must not change under them: end them first."
+    fi
+}
+
 # find_project DIR: the project containing DIR (a `realpath`), if any.
 find_project() {
     local d=$1
@@ -922,7 +948,8 @@ show_status() {
 	die "No project here: ai -w makes the current directory one."
     project=$(project_dir "$dir")
     echo "Project: $(rel_to_home "$dir")"
-    echo "Kept in: $(rel_to_home "$project") ($(du -sh -- "$project" | cut -f1))"
+    # 2>/dev/null: overlayfs leaves its work directory unreadable.
+    echo "Kept in: $(rel_to_home "$project") ($(du -sh -- "$project" 2>/dev/null | cut -f1))"
     lock=$(session_lock "$dir")
     if [ -e "$lock" ] && ! flock -n "$lock" true; then
 	echo "Session: running since $(date -r "$lock" '+%F %T')"
@@ -971,6 +998,33 @@ show_status() {
 				 "$red" "$rel" "$normal"
     done
 
+    # The project's changes to the agent's home, summed up two levels
+    # down (.claude/projects/...).  Overlayfs records deletions as
+    # whiteouts: character devices.
+    if [ -n "$(find "$project/home" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+	echo "Home layer: $(du -sh -- "$project/home" | cut -f1), changes to the agent's home:"
+	find "$project/home" -mindepth 1 \( -type c -printf 'd %P\0' -o \
+	     ! -type d -printf 'f %P\0' \) |
+	    LC_ALL=C sort -z -k2 |
+	    LC_ALL=C sed -z 's/[[:cntrl:]]/?/g' |
+	    awk 'BEGIN { RS = "\0" }
+	         { path = substr($0, 3)
+	           if (split(path, c, "/") <= 2) {
+	               key = path; deleted[key] = (substr($0, 1, 1) == "d")
+	           } else {
+	               key = c[1] "/" c[2] "/"; files[key]++
+	           }
+	           if (!(key in seen)) { seen[key] = 1; order[++k] = key } }
+	         END { for (i = 1; i <= k; i++) {
+	                   key = order[i]
+	                   if (key in files)
+	                       printf "  %s (%d file%s)\n", key, files[key],
+	                              (files[key] > 1 ? "s" : "")
+	                   else
+	                       printf "  %s%s\n", key, deleted[key] ? ": deleted" : ""
+	               } }'
+    fi
+
     # The private copies: at their path in the project, within shadow/.
     for n in "${PRIVATE[@]}"; do
 	expr+=(-o -name "$n")
@@ -1003,6 +1057,8 @@ fi
     die "Create the directory '$AIHOME' with minimal configuration files."
 [ -x /usr/bin/bwrap ] ||
     die "bubblewrap is not installed (e.g. 'apt install bubblewrap')."
+/usr/bin/bwrap --help 2>&1 | grep -q -- --overlay-src ||
+    die "bubblewrap is too old: version 0.10 or later is needed (--overlay)."
 command -v slirp4netns >/dev/null ||
     die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
 command -v nsenter >/dev/null ||
@@ -1044,8 +1100,11 @@ if [ -n "$work_path" ]; then
     lock_work_path "$work_path"
     register_project "$work_path"
     migrate_old_layout "$work_path"
-elif [ ${#read_only[@]} -gt 0 ]; then
-    die "--ro needs -w: the patterns are in the work directory."
+    lock_home shared
+else
+    [ ${#read_only[@]} -eq 0 ] ||
+	die "--ro needs -w: the patterns are in the work directory."
+    lock_home exclusive
 fi
 
 # What the sandbox doesn't see of the work dir, as find tests: each .git
@@ -1167,7 +1226,7 @@ EOF
 if [ -n "$ssh" ]; then
     # A private agent holding only the AI's key; it dies with the script.
     agent_sock="$tmp/agent.sock"
-    agent_pid=$(ssh-agent -s -a "$agent_sock" 9>&- |
+    agent_pid=$(ssh-agent -s -a "$agent_sock" 7>&- 9>&- |
 		    sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
     [ -n "$agent_pid" ] || die "--ssh: could not start ssh-agent."
 
@@ -1182,6 +1241,22 @@ if [ -n "$ssh" ]; then
 fi
 
 # --- Sandbox ------------------------------------------------------------
+
+if [ -n "$work_path" ]; then
+    # The base home read-only, under the project's own changes.  The
+    # work directory must be on the same file system as the changes.
+    mkdir -p -- "$project/home" "$project/home.work" || exit 1
+    home_args=(
+	--overlay-src "$AIHOME"
+	--overlay "$project/home" "$project/home.work" "$HOME"
+	# Claude Code: update in the base home (ai without -w), for all
+	# projects.  An update here would only land in this project's
+	# changes, a copy of the whole program.
+	--setenv DISABLE_AUTOUPDATER 1
+    )
+else
+    home_args=(--bind "$AIHOME/" "$HOME/")
+fi
 
 args=(
     --die-with-parent
@@ -1215,7 +1290,7 @@ args=(
     # Forbid using `unshare -U` to gain full capabilities in a fresh
     # namespace.
     --disable-userns
-    --bind "$AIHOME/" "$HOME/"
+    "${home_args[@]}"
     --ro-bind-try "$HOME/texmf" "$HOME/texmf"
     --setenv HOME "$HOME"
     --setenv USER "$USER"
@@ -1366,7 +1441,7 @@ fi
 	 --ready-fd=3 --netns-type=path "/proc/$pid/ns/net" tap0 \
 	 3>"$tmp/block" >/dev/null \
 	 2> >(grep --line-buffered -v -E '^(sent tapfd=[0-9]+ for tap0|received tapfd=[0-9]+)$' >&2)
-) 9>&- &
+) 7>&- 9>&- &
 slirp=$!
 
 # --- Run ----------------------------------------------------------------
@@ -1374,5 +1449,5 @@ slirp=$!
 # The block pipe is opened read-write: read-only would wait for a
 # writer, and slirp4netns only opens it once bwrap has started.
 /usr/bin/bwrap --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" "${cmd[@]}" \
-	       3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 9>&-
+	       3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&-
 exit $?

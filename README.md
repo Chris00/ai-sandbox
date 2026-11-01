@@ -38,7 +38,7 @@ namespaces.
 
 | Your…                     | Inside the sandbox                                                   |
 |---------------------------|----------------------------------------------------------------------|
-| home directory            | replaced by `~/AI/home`, a separate home for the agent; only your TeX files (`~/texmf`) are added, read-only |
+| home directory            | replaced by `~/AI/home`, a separate home for the agent, whose changes to it in a project stay in that project (see [The agent's home](#the-agents-home)); only your TeX files (`~/texmf`) are added, read-only |
 | work directory (`-w`)     | the current directory, read-write under `/work`; nothing else of yours is mounted |
 | Git history and config    | each `.git` is hidden behind a clone, so the agent can't rewrite your history, hooks or config |
 | build output and tool settings | `target/`, `.venv/`, `node_modules/`… replaced by private directories; settings that make tools run code (`.envrc`, `.cargo/`, `.vscode/`…) read-only (see [Tool files](#tool-files)) |
@@ -75,11 +75,13 @@ The script also checks the host side, before and after each session:
 
 ## Requirements
 
-- Linux with unprivileged user namespaces, systemd (`systemd-escape`
-  names the projects' directories), and a systemd user session for
-  the resource limits
-- [bubblewrap](https://github.com/containers/bubblewrap) ≥ 0.8
-  (`bwrap --disable-userns`)
+- Linux ≥ 5.11 with unprivileged user namespaces (for overlayfs in
+  them), systemd (`systemd-escape` names the projects' directories),
+  and a systemd user session for the resource limits
+- [bubblewrap](https://github.com/containers/bubblewrap) ≥ 0.10
+  (`bwrap --overlay`); Debian 12 and Ubuntu 24.04 ship older versions
+- `~/AI` on a file system with user extended attributes, which
+  overlayfs needs (ext4, Btrfs, XFS… but not NFS)
 - [slirp4netns](https://github.com/rootless-containers/slirp4netns)
 - util-linux ≥ 2.39 (`nsenter --user-parent`, `lsns`, `findmnt`, `flock`)
 - `nftables` (`nft`), with the `nf_tables` kernel module loaded
@@ -123,7 +125,8 @@ on inotify watches; `ai` then says so. Raise it with, for example,
    mkdir -p ~/AI/home
    ```
 
-   Tools installed while running `ai` without `-w` go there too.
+   Tools installed while running `ai` without `-w` go there too, and
+   all projects see them (see [The agent's home](#the-agents-home)).
 
 3. Make sure `nf_tables` is loaded at boot. It usually is already when
    ufw or firewalld is used. Otherwise:
@@ -176,15 +179,18 @@ ai --status
 ```
 
 - `-w`, `--work`: make the current directory the work directory: it is
-  mounted read-write in the sandbox, which starts there. Without `-w`,
-  the sandbox starts in the agent's home and none of your files are
-  mounted. A directory in your home is mounted at `/work/` followed by
-  its path relative to your home (`~/software/project` at
+  mounted read-write in the sandbox, which starts there.  If the
+  current directory is in your home, it is mounted at `/work/`
+  followed by its path relative to your home (`~/software/project` at
   `/work/software/project`). Any other directory, meant for temporary
   experiments, is mounted at `/work-tmp/` followed by its full path
   (`/tmp/test` at `/work-tmp/tmp/test`). Each project thus has its own
   path, so tools that keep data per directory, such as an agent's
   history or memory, keep the projects apart.
+
+  Without `-w`, the sandbox starts in the agent's home and none of
+  your files are mounted, and changes to its home are seen by all
+  projects.
 - `--ro PATTERN...`, `--read-only PATTERN...`: make what matches the
   patterns read-only in the sandbox (see
   [Read-only files](#read-only-files)). Needs `-w`.
@@ -205,7 +211,7 @@ directory of its own (see [Files](#files)).  Projects can't overlap:
 once `~/software/proj` is a project, `ai` refuses to start in
 `~/software/proj/sub` or in `~/software`, since a repository in both
 would get two clones.  Work in the existing project, or delete its
-directory in `~/AI/projects` to start afresh.
+directory in `~/AI/projects` to start afresh (see [Files](#files)).
 
 ### Status
 
@@ -220,16 +226,50 @@ Repo .:
   ai/fix-parser: 3 commits not in your branches
   ai/main: new commits, not fetched yet (git fetch ai)
 Repo vendor/lib: nothing left to merge
+Home layer: 2.4M, changes to the agent's home:
+  .claude.json
+  .claude/projects/ (12 files)
+  .bash_history
 Private copies:
   .venv: 85M
   target: 1.2G
 ```
 
 For each repository, it lists the agent's branches with commits not in
-your branches (see [Working with Git](#working-with-git)), and for
-each private build directory (see [Tool files](#tool-files)) its size,
+your branches (see [Working with Git](#working-with-git)). It then
+lists the project's changes to the agent's home (see
+[The agent's home](#the-agents-home)), two levels down, and each
+private build directory (see [Tool files](#tool-files)) with its size,
 noting those the project no longer uses.  It reads the clones from
 your repositories, like `git fetch ai`, and runs nothing in them.
+
+
+## The agent's home
+
+`~/AI/home` is the agent's base home: its shell configuration, its
+tools, its settings and login. A session without `-w` works in it
+directly, to install or update tools for all projects.
+
+In a project, the agent sees an overlay instead: the base home,
+read-only, with the project's own changes on top, kept in the
+project's `home/` (see [Files](#files)). Whatever the agent writes to
+its home there (history, memory, settings, caches, a modified shell
+profile…) stays in the project: other projects don't see it, and a
+manipulated agent can't use it to reach them. `ai --status` lists
+these changes.
+
+A change to the base home is seen in every project, unless the project
+has changed that file itself: its own copy then wins. Since the base
+home must not change under a running overlay, `ai` refuses to start a
+session without `-w` while project sessions run, and project sessions
+while it runs.
+
+For the same reason, Claude Code's automatic updates are turned off in
+projects (`DISABLE_AUTOUPDATER=1`): an update there would copy the
+whole new version into that project only. Update in a session without
+`-w`. Likewise, log the agent in from a session without `-w`, so that
+all projects see the credentials: a login, or credentials the agent
+refreshes, during a project session stays in that project.
 
 
 ## Read-only files
@@ -476,7 +516,7 @@ Without a systemd user session, `ai` runs without limits and says so.
 |----------------------|--------------------------------------------------|
 | `~/AI/home`          | the agent's home directory                       |
 | `~/AI/projects/`     | one directory per project (see below)            |
-| `~/AI/locks`         | one lock per running session                     |
+| `~/AI/locks`         | the locks of the running sessions                |
 | `~/AI/warnings.log`  | warnings from the checks during the session and at exit, with their time |
 | `~/.ssh/id_ed25519_ai` | the agent's SSH key (`--ssh`)                  |
 
@@ -491,6 +531,16 @@ gives `home-you-software-proj`).  It holds:
 | `path`    | the project's path                                             |
 | `git/`    | the clones of the project's repositories, at their path in it  |
 | `shadow/` | the agent's private build output and environments              |
+| `home/`   | the project's changes to the agent's home (the overlay's upper layer) |
+| `home.work/` | overlayfs's work directory                                  |
+
+Overlayfs leaves an unreadable directory in `home.work/`. To delete a
+project's directory by hand, make it readable first:
+
+```sh
+chmod -R u+rwx ~/AI/projects/home-you-software-proj/home.work
+rm -rf ~/AI/projects/home-you-software-proj
+```
 
 Older versions of `ai` kept the clones in `~/AI/work` and the private
 directories in `~/AI/shadow`.  The first session in a project moves
@@ -547,7 +597,8 @@ untrusted code harmless.
   that matters.
 - **Public addresses.** Only private network ranges are blocked. Servers
   on public addresses, such as some company networks, remain reachable.
-- **Persistence between sessions.** `~/AI/home` is shared by all
-  projects and kept between sessions.  A manipulated agent could leave
-  something there (in its shell profile, its tools' configuration or
-  installed packages) that runs in later sessions, on other projects.
+- **Persistence between sessions.** What the agent leaves in its home
+  in a project (in its shell profile, its tools' configuration or
+  installed packages) runs in that project's later sessions. What it
+  leaves there in a session without `-w` runs in every project: keep
+  those sessions for installing and updating trusted tools.
