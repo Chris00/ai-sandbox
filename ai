@@ -1042,6 +1042,7 @@ lock_work_path() {
 	    continue
 	fi
 	other=$(<"$f")
+	[ "$other" = "$dir" ] && die "A session is running in $dir."
 	case $dir/ in "$other"/*)
 	    die "Another session works in $other, which contains $dir." ;;
 	esac
