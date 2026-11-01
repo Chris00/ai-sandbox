@@ -172,6 +172,7 @@ on inotify watches; `ai` then says so. Raise it with, for example,
 
 ```
 ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
+ai --status
 ```
 
 - `-w`, `--work`: make the current directory the work directory: it is
@@ -188,6 +189,8 @@ ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
   patterns read-only in the sandbox (see
   [Read-only files](#read-only-files)). Needs `-w`.
 - `--ssh`: give the sandbox an SSH agent holding only the agent's key.
+- `--status`: show what `ai` keeps for the project containing the
+  current directory (see [Status](#status)).
 - `-h`, `--help`: show a summary of the options and the resource limits.
 - `-- COMMAND [ARG...]`: run `COMMAND` instead of an interactive shell.
   Everything after `--` is passed to it unchanged, options included:
@@ -203,6 +206,30 @@ once `~/software/proj` is a project, `ai` refuses to start in
 `~/software/proj/sub` or in `~/software`, since a repository in both
 would get two clones.  Work in the existing project, or delete its
 directory in `~/AI/projects` to start afresh.
+
+### Status
+
+`ai --status`, in a project's directory or any directory below it,
+shows what `ai` keeps for it:
+
+```
+Project: ~/software/proj
+Kept in: ~/AI/projects/home-you-software-proj (1.3G)
+Session: none
+Repo .:
+  ai/fix-parser: 3 commits not in your branches
+  ai/main: new commits, not fetched yet (git fetch ai)
+Repo vendor/lib: nothing left to merge
+Private copies:
+  .venv: 85M
+  target: 1.2G
+```
+
+For each repository, it lists the agent's branches with commits not in
+your branches (see [Working with Git](#working-with-git)), and for
+each private build directory (see [Tool files](#tool-files)) its size,
+noting those the project no longer uses.  It reads the clones from
+your repositories, like `git fetch ai`, and runs nothing in them.
 
 
 ## Read-only files

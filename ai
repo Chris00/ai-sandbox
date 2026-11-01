@@ -4,6 +4,7 @@
 # sandbox.
 #
 # Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
+#        ai --status
 #
 # Without COMMAND, run an interactive shell.  Without -w, the sandbox
 # starts in the agent's home, e.g. to install tools.
@@ -35,6 +36,10 @@
 # also matches "/"); "." is the whole work dir.  An unquoted glob,
 # expanded by your shell, only gives what is in the current directory
 # itself: quote it to reach subdirectories.
+#
+# --status shows what ai keeps for the project containing the current
+# directory: the agent's branches with commits not in yours, the
+# private copies and whether a session is running.
 
 # The base $HOME/AI is protected below.
 AIHOME="$HOME/AI/home"
@@ -113,6 +118,7 @@ die() {
 usage() {
     cat <<'EOF'
 Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
+       ai --status
 
 Run an interactive shell, or COMMAND, for an AI agent in a sandbox: it
 gets its own home (~/AI/home) and the internet, but not the rest of
@@ -135,6 +141,10 @@ Options:
   --ssh                   Give the sandbox an SSH agent holding only
                           ~/.ssh/id_ed25519_ai, usable on the hosts of
                           AI_SSH_HOSTS (set in the script).
+  --status                Show the project containing the current directory:
+                          the agent's branches with commits not in
+                          yours, the private copies, whether a session
+                          is running.
   -h, --help              Show this help.
   -- COMMAND [ARG...]     Run COMMAND instead of a shell.
 
@@ -155,12 +165,14 @@ More in the README: https://github.com/Chris00/ai-sandbox
 EOF
 }
 
-# --help first: it needs neither the resource limits nor the checks.
-# Arguments after "--" belong to the command.
+# --help and --status first: they need neither the resource limits nor
+# the checks.  Arguments after "--" belong to the command.
+status=
 for arg; do
     case $arg in
 	--) break ;;
 	-h|--help) usage; exit 0 ;;
+	--status) status=1 ;;
     esac
 done
 unset arg
@@ -177,7 +189,7 @@ AI_TASKS=${AI_TASKS:-1024}              # processes and threads
 [[ $AI_CPUS =~ ^[1-9][0-9]*$ && $AI_TASKS =~ ^[1-9][0-9]*$ ]] ||
     die "AI_CPUS and AI_TASKS must be positive integers."
 
-if [ -z "$AI_IN_SCOPE" ]; then
+if [ -z "$AI_IN_SCOPE" ] && [ -z "$status" ]; then
     if systemctl --user show-environment >/dev/null 2>&1; then
 	AI_IN_SCOPE=1 exec systemd-run --user --scope --quiet \
 	    --description="AI sandbox" \
@@ -210,6 +222,9 @@ while [[ $# -gt 0 ]]; do
 	    ssh=1
 	    shift
 	    ;;
+	--status)
+	    shift                       # $status is already set
+	    ;;
 	--ro|--read-only)
 	    # All the patterns up to the next option or "--": an unquoted
 	    # glob, expanded by the shell, gives several.  A pattern
@@ -239,6 +254,9 @@ while [[ $# -gt 0 ]]; do
 	    ;;
     esac
 done
+if [ -n "$status" ] && [ -n "$work_path$ssh${read_only[*]}${cmd[*]}" ]; then
+    die "--status takes no other option."
+fi
 
 # --- Helpers ------------------------------------------------------------
 
@@ -836,6 +854,11 @@ rmdir_up() {
     return 0
 }
 
+# session_lock DIR: the lock file of the session working in DIR.
+session_lock() {
+    printf '%s/%s.session' "$LOCKDIR" "$(printf %s "$1" | sha256sum | cut -c1-16)"
+}
+
 # lock_work_path DIR: refuse to start when another session's work dir
 # is DIR, contains it or is inside it; otherwise register DIR.  The
 # lock stays held on file descriptor 9 until the script exits.
@@ -865,11 +888,114 @@ lock_work_path() {
     done
     # Held until the script exits: the kernel releases the lock with
     # the file descriptor, whatever the reason the script ends.
-    exec 9>"$LOCKDIR/$(printf %s "$dir" | sha256sum | cut -c1-16).session"
+    exec 9>"$(session_lock "$dir")"
     flock -n 9 || die "Another session is using $dir."
     printf '%s\n' "$dir" >&9
     exec 8>&-                      # release the global lock
 }
+
+# find_project DIR: the project containing DIR (a `realpath`), if any.
+find_project() {
+    local d=$1
+    while [ ! -f "$(project_dir "$d")/path" ]; do
+	[ "$d" = / ] && return 1
+	d=$(dirname -- "$d")
+    done
+    printf '%s' "$d"
+}
+
+# safe STRING: STRING with its control characters, which could drive
+# your terminal, replaced by "?".  For what comes from the agent.
+safe() {
+    local LC_ALL=C              # bytes: leave UTF-8 characters alone
+    printf '%s' "${1//[[:cntrl:]]/?}"
+}
+
+# show_status: what ai keeps for the project containing the current
+# directory (the project root may be a super-directory), if any.  The
+# branch names and paths it shows go through `safe`: they come from the
+# agent.
+show_status() {
+    local dir project lock g copy rel repo heads line sha name n p size
+    local -a clones copies expr
+    dir=$(find_project "$(realpath -e -- .)") ||
+	die "No project here: ai -w makes the current directory one."
+    project=$(project_dir "$dir")
+    echo "Project: $(rel_to_home "$dir")"
+    echo "Kept in: $(rel_to_home "$project") ($(du -sh -- "$project" | cut -f1))"
+    lock=$(session_lock "$dir")
+    if [ -e "$lock" ] && ! flock -n "$lock" true; then
+	echo "Session: running since $(date -r "$lock" '+%F %T')"
+    else
+	echo "Session: none"
+    fi
+
+    # The clones' branches, from your repos: ls-remote, like fetch, runs
+    # no code from the clone.  Never run Git inside the clones.
+    mapfile -d '' -t clones < <(git_repos "$project/git" 2>/dev/null)
+    for g in "${clones[@]}"; do
+	copy=${g%/.git}
+	rel=${copy#"$project/git"}
+	rel=${rel#/}
+	repo="$dir${rel:+/$rel}"
+	rel=$(safe "${rel:-.}")         # for display only from here on
+	if [ ! -d "$repo/.git" ]; then
+	    printf "Repo %s%s%s: gone from the project (its clone is kept)\n" \
+		   "$red" "$rel" "$normal"
+	    continue
+	fi
+	if ! heads=$(git -C "$repo" ls-remote --heads -- "$copy" 2>/dev/null); then
+	    printf "Repo %s%s%s: cannot read its clone\n" \
+		   "$red" "$rel" "$normal"
+	    continue
+	fi
+	n=0
+	while IFS=$'\t' read -r sha name; do
+	    # Git gives a null ID for the refs it finds invalid.
+	    [[ $sha =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ && $sha == *[1-9a-f]* ]] ||
+		continue
+	    name=$(safe "ai/${name#refs/heads/}")
+	    if ! git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null; then
+		line="new commits, not fetched yet (git fetch ai)"
+	    else
+		line=$(git -C "$repo" rev-list --count "$sha" --not --branches --)
+		[ "$line" -gt 0 ] || continue
+		[ "$line" -eq 1 ] && line="1 commit" || line="$line commits"
+		line="$line not in your branches"
+	    fi
+	    [ $((n++)) -eq 0 ] &&
+		printf "Repo %s%s%s:\n" "$red" "$rel" "$normal"
+	    echo "  $name: $line"
+	done <<<"$heads"
+	[ "$n" -eq 0 ] && printf "Repo %s%s%s: nothing left to merge\n" \
+				 "$red" "$rel" "$normal"
+    done
+
+    # The private copies: at their path in the project, within shadow/.
+    for n in "${PRIVATE[@]}"; do
+	expr+=(-o -name "$n")
+    done
+    mapfile -d '' -t copies < <(
+	find "$project/shadow" -mindepth 1 \( "${expr[@]:1}" \) -type d -prune -print0 \
+	     2>/dev/null | LC_ALL=C sort -z
+    )
+    [ ${#copies[@]} -gt 0 ] && echo "Private copies:"
+    for p in "${copies[@]}"; do
+	rel=${p#"$project/shadow/"}
+	size=$(du -sh -- "$p" | cut -f1)
+	# Unused: no such directory, nor will a tool create it (PRIVATE_IF).
+	if [ ! -e "$dir/$rel" ] &&
+	       ! { [ -n "${PRIVATE_IF[$rel]}" ] && [ -e "$dir/${PRIVATE_IF[$rel]}" ]; }; then
+	    size="$size, unused: no $(safe "$rel") in the project"
+	fi
+	echo "  $(safe "$rel"): $size"
+    done
+}
+
+if [ -n "$status" ]; then
+    show_status
+    exit
+fi
 
 # --- Checks -------------------------------------------------------------
 
