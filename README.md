@@ -180,7 +180,7 @@ on inotify watches; `ai` then says so. Raise it with, for example,
 ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 ai --status
 ai --promote PATH...
-ai --reset | --forget
+ai --reset | --forget [DIR] | --list
 ```
 
 - `-w`, `--work`: make the current directory the work directory: it is
@@ -205,9 +205,10 @@ ai --reset | --forget
 - `--promote PATH...`: make the project's version of files of the
   agent's home the base version, for every project (see
   [Promoting a change](#promoting-a-change)).
-- `--reset`, `--forget`: delete the project's changes to the agent's
-  home, or everything `ai` keeps for the project (see
+- `--reset`, `--forget [DIR]`: delete the project's changes to the
+  agent's home, or everything `ai` keeps for the project (see
   [Starting afresh](#starting-afresh)).
+- `--list`: list the projects (see [Listing the projects](#listing-the-projects)).
 - `-h`, `--help`: show a summary of the options and the resource limits.
 - `-- COMMAND [ARG...]`: run `COMMAND` instead of an interactive shell.
   Everything after `--` is passed to it unchanged, options included:
@@ -241,7 +242,29 @@ Two commands, run in a project's directory or below it, delete what
   be lost, so fetch and merge them first, or make branches of them.
   The next session in the directory starts a new project.
 
-Both refuse to run during a session in the project.
+Both refuse to run during a session in the project. `ai --forget DIR`
+forgets the project `DIR` from anywhere, even when that directory no
+longer exists, after you deleted or moved it (see
+[Listing the projects](#listing-the-projects)). The clones of its
+repositories may then hold the only copy of the agent's commits, so
+`ai` warns about them too.
+
+### Listing the projects
+
+`ai --list` shows every project, with the size of what `ai` keeps for
+it and the start of its latest session:
+
+```
+~/research/paper     12M  2026-10-12 09:14
+~/software/old      380M  2026-06-30 17:41  gone: ai --forget ~/software/old
+~/software/proj     1.3G  2026-11-01 14:02  session running
+```
+
+A project is *gone* when its directory no longer exists: deleted,
+renamed or moved. A moved project gets a new, empty one at its first
+session in the new place; forget the old one. `ai --list` also says
+when `~/AI/work` or `~/AI/shadow`, from an older version of `ai`, still
+hold projects to migrate (see [Files](#files)).
 
 ### Status
 
@@ -685,9 +708,9 @@ gives `home-you-software-proj`).  It holds:
 | `home.work/` | overlayfs's work directory                                  |
 
 `ai --forget` deletes a project's directory (see
-[Starting afresh](#starting-afresh)). To do it by hand, for a project
-whose directory no longer exists, say, make it writable first:
-overlayfs leaves an unreadable directory in `home.work/`:
+[Starting afresh](#starting-afresh)). To do it by hand, make it
+writable first: overlayfs leaves an unreadable directory in
+`home.work/`:
 
 ```sh
 chmod -R u+rwx ~/AI/projects/home-you-software-proj
@@ -697,6 +720,7 @@ rm -rf ~/AI/projects/home-you-software-proj
 Older versions of `ai` kept the clones in `~/AI/work` and the private
 directories in `~/AI/shadow`.  The first session in a project moves
 them to its directory, and updates the `ai` remote of its repositories.
+`ai --list` says when some remain.
 
 A few directories of the host are also available in the sandbox,
 read-only, so that the agent can compile your LaTeX documents:

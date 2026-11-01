@@ -6,7 +6,7 @@
 # Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
 #        ai --status
 #        ai --promote PATH...
-#        ai --reset | --forget
+#        ai --reset | --forget [DIR] | --list
 #
 # Without COMMAND, run an interactive shell.  Without -w, the sandbox
 # starts in the agent's home, e.g. to install tools: its changes there
@@ -54,7 +54,8 @@
 # --promote PATH... makes the project's version of files of the agent's
 # home the base version, for every project.  --reset deletes the
 # project's changes to the agent's home, --forget everything ai keeps
-# for the project.
+# for the project (of DIR, if given, even if it no longer exists).
+# --list shows all the projects.
 
 # The base $HOME/AI is protected below.
 AIHOME="$HOME/AI/home"
@@ -183,7 +184,7 @@ usage() {
 Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
        ai --status
        ai --promote PATH...
-       ai --reset | --forget
+       ai --reset | --forget [DIR] | --list
 
 Run an interactive shell, or COMMAND, for an AI agent in a sandbox: it
 gets its own home (~/AI/home) and the internet, but not the rest of
@@ -216,9 +217,12 @@ Options:
                           one, for every project, after showing it.
   --reset                 Delete the project's changes to the agent's
                           home (history, memory...), after asking.
-  --forget                Delete everything ai keeps for the project
-                          (clones, private copies, home changes) and the
-                          "ai" remote of its repositories, after asking.
+  --forget [DIR]          Delete everything ai keeps for the project, or
+                          for the project DIR, even gone (clones, private
+                          copies, home changes), and the "ai" remote of
+                          its repositories, after asking.
+  --list                  List the projects: size, latest session, those
+                          running or gone.
   -h, --help              Show this help.
   -- COMMAND [ARG...]     Run COMMAND instead of a shell.
 
@@ -242,12 +246,12 @@ EOF
 # --help and the commands on projects first: they need neither the
 # resource limits nor the checks.  Arguments after "--" belong to the
 # command.
-action=                                 # status, promote, reset or forget
+action=                    # status, promote, reset, forget or list
 for arg; do
     case $arg in
 	--) break ;;
 	-h|--help) usage; exit 0 ;;
-	--status|--promote|--reset|--forget) action=${arg#--} ;;
+	--status|--promote|--reset|--forget|--list) action=${arg#--} ;;
     esac
 done
 unset arg
@@ -321,8 +325,16 @@ while [[ $# -gt 0 ]]; do
 	    ssh=1
 	    shift
 	    ;;
-	--status|--reset|--forget)
+	--status|--reset|--list)
 	    shift                       # $action is already set
+	    ;;
+	--forget)
+	    shift
+	    # An optional DIR, e.g. a project whose directory is gone.
+	    if [ $# -gt 0 ] && [[ $1 != -* ]]; then
+		forget_dir=$1
+		shift
+	    fi
 	    ;;
 	--promote)
 	    shift
@@ -957,7 +969,8 @@ register_project() {
     done
     project=$(project_dir "$dir")
     mkdir -p -- "$project" || exit 1
-    [ -f "$project/path" ] || printf '%s\n' "$dir" >"$project/path"
+    # Rewritten at each session: its time is the project's latest use.
+    printf '%s\n' "$dir" >"$project/path"
 }
 
 # migrate_old_layout DIR: move what an older version of ai kept for the
@@ -1125,7 +1138,7 @@ show_home_layer() {
     fi
 }
 
-# show_status: what ai keeps for the project containing the current
+# show_status [DIR]: what ai keeps for the project containing the current
 # directory (the project root may be a super-directory), if any.  The
 # branch names and paths it shows go through `safe`: they come from the
 # agent.
@@ -1133,10 +1146,18 @@ show_status() {
     local dir project lock g copy rel repo heads line sha name n p size
     local -a clones copies expr
     unmerged=0
-    dir=$(find_project "$(realpath -e -- .)") ||
-	die "No project here: ai -w makes the current directory one."
+    if [ $# -gt 0 ]; then
+	dir=$1
+    else
+	dir=$(find_project "$(realpath -e -- .)") ||
+	    die "No project here: ai -w makes the current directory one."
+    fi
     project=$(project_dir "$dir")
-    echo "Project: $(rel_to_home "$dir")"
+    if [ -d "$dir" ]; then
+	echo "Project: $(rel_to_home "$dir")"
+    else
+	echo "Project: $(rel_to_home "$dir") (gone)"
+    fi
     # 2>/dev/null: overlayfs leaves its work directory unreadable.
     echo "Kept in: $(rel_to_home "$project") ($(du -sh -- "$project" 2>/dev/null | cut -f1))"
     lock=$(session_lock "$dir")
@@ -1158,6 +1179,8 @@ show_status() {
 	if [ ! -d "$repo/.git" ]; then
 	    printf "Repo %s%s%s: gone from the project (its clone is kept)\n" \
 		   "$red" "$rel" "$normal"
+	    # The clone may hold the only copy of the agent's commits.
+	    unmerged=$((unmerged + 1))
 	    continue
 	fi
 	if ! heads=$(git -C "$repo" ls-remote --heads -- "$copy" 2>/dev/null); then
@@ -1378,22 +1401,30 @@ reset_home() {
 forget() {
     local dir project g url
     local -a repos
-    dir=$(find_project "$(realpath -e -- .)") ||
-	die "No project here: run ai --forget in the project."
+    if [ $# -gt 0 ]; then
+	# -m: the directory may be gone.
+	dir=$(realpath -m -- "$1") || exit 1
+	[ -f "$(project_dir "$dir")/path" ] ||
+	    die "$1 is not a project (see ai --list)."
+    else
+	dir=$(find_project "$(realpath -e -- .)") ||
+	    die "No project here: run ai --forget in the project, or give its directory."
+    fi
     project=$(project_dir "$dir")
-    show_status                 # sets $unmerged
+    show_status "$dir"          # sets $unmerged
     # No session in the project meanwhile, until the script exits.
     lock_work_path "$dir"
     if [ "$unmerged" -gt 0 ]; then
-	echo "The agent's commits listed above are in no branch of yours: deleting the" >&2
-	echo "clones and the ai remote loses them.  Fetch and merge them first, or make" >&2
-	echo "branches of them (git branch NAME ai/BRANCH, after git fetch ai)." >&2
+	echo "The agent's commits listed above are in no branch of yours, nor, for a repo" >&2
+	echo "that is gone, anywhere but in its clone: deleting the clones and the ai" >&2
+	echo "remote loses them.  Fetch and merge them first, or make branches of them" >&2
+	echo "(git branch NAME ai/BRANCH, after git fetch ai)." >&2
     fi
     confirm "Delete $(rel_to_home "$project"), and the ai remote of the project's repos?" ||
 	exit 1
 
     # Only the remotes leading to this project's clones.
-    mapfile -d '' -t repos < <(git_repos "$dir")
+    mapfile -d '' -t repos < <(git_repos "$dir" 2>/dev/null)
     for g in "${repos[@]}"; do
 	url=$(/usr/bin/git config --file "$g/config" remote.ai.url)
 	case $url in
@@ -1408,11 +1439,45 @@ forget() {
     echo "Forgot $(rel_to_home "$dir")."
 }
 
+# list_projects: every project, with its size and the start of its
+# latest session (when its path file was last touched), noting those
+# with a session running and those whose directory is gone.
+list_projects() {
+    local f dir lock state size when width=0 i
+    local -a names=() rows=()
+    for f in "$PROJECTS"/*/path; do
+	[ -f "$f" ] || continue
+	dir=$(<"$f")
+	lock=$(session_lock "$dir")
+	if [ ! -d "$dir" ]; then
+	    state="gone: ai --forget $(rel_to_home "$dir")"
+	elif [ -e "$lock" ] && ! flock -n "$lock" true; then
+	    state="session running"
+	else
+	    state=
+	fi
+	names+=("$(rel_to_home "$dir")")
+	# 2>/dev/null: overlayfs leaves its work directory unreadable.
+	rows+=("$(du -sh -- "${f%/path}" 2>/dev/null | cut -f1)	$(date -r "$f" '+%F %R')	$state")
+	[ ${#names[-1]} -le "$width" ] || width=${#names[-1]}
+    done
+    [ ${#names[@]} -gt 0 ] || echo "No projects yet: ai -w makes the current directory one."
+    for i in "${!names[@]}"; do
+	IFS=$'\t' read -r size when state <<<"${rows[i]}"
+	printf '%-*s  %5s  %s%s\n' "$width" "${names[i]}" "$size" "$when" "${state:+  $state}"
+    done
+    # The old layout: remove with migrate_old_layout.
+    if [ -d "$HOME/AI/work" ] || [ -d "$HOME/AI/shadow" ]; then
+	echo "Not migrated yet: the projects of ~/AI/work or ~/AI/shadow, moved at their next session."
+    fi
+}
+
 case $action in
     status)  show_status; exit ;;
     promote) promote "${promote_paths[@]}"; exit ;;
     reset)   reset_home; exit ;;
-    forget)  forget; exit ;;
+    forget)  forget ${forget_dir+"$forget_dir"}; exit ;;
+    list)    list_projects; exit ;;
 esac
 
 # --- Checks -------------------------------------------------------------
