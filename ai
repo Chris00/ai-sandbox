@@ -1193,9 +1193,9 @@ show_status() {
     done
 }
 
-# home_rel PATH: PATH, a file of the agent's home (~/.bashrc, .bashrc),
+# agent_file PATH: PATH, a file of the agent's home (~/.bashrc, .bashrc),
 # relative to the home.
-home_rel() {
+agent_file() {
     local p=$1
     case $p in
 	"~/"*)     p=${p#"~/"} ;;
@@ -1272,7 +1272,7 @@ promote() {
     base=$(realpath -e -- "$AIHOME") || exit 1
 
     for p; do
-	rel=$(home_rel "$p") || exit 1
+	rel=$(agent_file "$p") || exit 1
 	src="$layer/$rel"
 	[ -e "$src" ] || [ -L "$src" ] ||
 	    die "~/$rel has no changes in this project (see ai --status)."
