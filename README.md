@@ -280,9 +280,9 @@ Repo .:
   ai/main: new commits, not fetched yet (git fetch ai)
 Repo vendor/lib: nothing left to merge
 Home layer: 2.4M, changes to the agent's home:
-  .claude.json
-  .claude/projects/ (12 files)
-  .bash_history
+  .bashrc
+  .claude/projects/ (1 file)
+  and 37 more in HOME_IGNORE (histories, caches...).
 Private copies:
   .venv: 85M
   target: 1.2G
@@ -291,7 +291,8 @@ Private copies:
 For each repository, it lists the agent's branches with commits not in
 your branches (see [Working with Git](#working-with-git)). It then
 lists the project's changes to the agent's home (see
-[The agent's home](#the-agents-home)), two levels down, and each
+[The agent's home](#the-agents-home)), two levels down, only counting
+those in `HOME_IGNORE`, and each
 private build directory (see [Tool files](#tool-files)) with its size,
 noting those the project no longer uses.  It reads the clones from
 your repositories, like `git fetch ai`, and runs nothing in them.
@@ -365,7 +366,7 @@ Changed in the agent's home, in this project only (in ~/AI/projects/home-you-sof
   .bashrc
   .claude/settings.json (deleted)
   .claude/projects/-work-software-proj/memory/MEMORY.md
-  and 12 other files (ai --status lists the project's changes).
+  and 12 more (ai --status lists the project's changes).
 Once reviewed, ai --promote PATH in the project makes one the base version.
 ```
 
@@ -373,9 +374,15 @@ In a project, the change is in its `home/`: review it there, and
 delete the file to go back to the base version, or promote it (see
 below). After a session without
 `-w`, the report covers these files in the base home, which every
-project sees. Claude Code's `~/.claude.json`, which holds its MCP
-servers, isn't in the list: Claude Code rewrites it at every start, so
-it would always be reported.
+project sees.
+
+The other changes are counted, except those to files that change in
+about every session: shell and other histories, `~/.cache`, Claude
+Code's state, transcripts and to-do lists… Their list, `HOME_IGNORE`,
+can be extended in your configuration too; `ai --status` only counts
+them. Claude Code's `~/.claude.json` is among them, although it holds
+its MCP servers: Claude Code rewrites it at every start, so it would
+always be reported. A file in both lists is reported.
 
 ### Promoting a change
 
@@ -662,6 +669,7 @@ AI_PROJECT_ENV+=(
 )
 
 HOME_TRIGGERS+=(.config/myagent)     # see The agent's home
+HOME_IGNORE+=(.local/state/myagent)
 READONLY+=(.myrc)                    # see Tool files
 PRIVATE+=(_build)
 PRIVATE_IF[_build]=dune-project

@@ -123,8 +123,6 @@ declare -A PRIVATE_IF=(
 # its later sessions: changes to them during a session are reported at
 # exit.  Paths relative to the home; "*" matches any characters,
 # including "/", and a directory covers what it contains.
-# (~/.claude.json, which holds Claude Code's MCP servers, is left out:
-# Claude Code rewrites it at every start.)
 HOME_TRIGGERS=(
     .profile .bashrc .bash_profile .bash_login .bash_logout .inputrc
     .zshenv .zprofile .zshrc .zlogin .config/fish
@@ -136,6 +134,19 @@ HOME_TRIGGERS=(
     .claude/settings.json .claude/settings.local.json .claude/CLAUDE.md
     .claude/hooks .claude/commands .claude/agents .claude/skills
     .claude/plugins .claude/projects/*/memory .local/share/claude
+)
+
+# Files of the agent's home that change in about every session, and
+# that the reports leave out (unless they are also $HOME_TRIGGERS):
+# histories, caches, the agents' own state.  Patterns as above.
+HOME_IGNORE=(
+    .bash_history .zsh_history .python_history .node_repl_history
+    .lesshst .viminfo .wget-hsts .sqlite_history
+    .cache
+    # Claude Code: its state (~/.claude.json, rewritten at every start,
+    # though it also holds the MCP servers), transcripts, to-do lists...
+    .claude.json .claude.json.backup .claude/projects/*.jsonl
+    .claude/todos .claude/shell-snapshots .claude/statsig
 )
 
 # List of destination constraints of the form ‘[user@]dest-hostname’
@@ -635,13 +646,14 @@ home_snapshot() {
     ) | LC_ALL=C sed -z 's|^\(.\t[^\t]*\t\)\./|\1|' | LC_ALL=C sort -z
 }
 
-# is_home_trigger PATH: true if PATH, relative to the agent's home, is
-# one of the $HOME_TRIGGERS or in one.
-is_home_trigger() {
-    local pat
-    for pat in "${HOME_TRIGGERS[@]}"; do
+# home_match PATH PATTERN...: true if PATH, relative to the agent's
+# home, matches one of the PATTERNs (see $HOME_TRIGGERS) or is in one.
+home_match() {
+    local path=$1 pat
+    shift
+    for pat; do
 	# shellcheck disable=SC2053     # $pat is a glob
-	[[ $1 == $pat || $1 == $pat/* ]] && return 0
+	[[ $path == $pat || $path == $pat/* ]] && return 0
     done
     return 1
 }
@@ -653,10 +665,10 @@ home_changes() {
     local type ctime path n=0
     local -a found=()
     while IFS=$'\t' read -r -d '' type ctime path; do
-	if is_home_trigger "$path"; then
+	if home_match "$path" "${HOME_TRIGGERS[@]}"; then
 	    [ "$type" = d ] && path="$path (deleted)"
 	    found+=("$path")
-	else
+	elif ! home_match "$path" "${HOME_IGNORE[@]}"; then
 	    n=$((n + 1))
 	fi
     done < <(LC_ALL=C comm -z -13 "$tmp/home.before" <(home_snapshot "${home_watch[@]}"))
@@ -667,7 +679,7 @@ home_changes() {
 	echo "Changed in the agent's base home, seen by every project (in $(rel_to_home "$AIHOME")):"
     fi
     printf '%s\n' "${found[@]}" | indent
-    [ "$n" -eq 0 ] || echo "  and $n other files (ai --status lists the project's changes)."
+    [ "$n" -eq 0 ] || echo "  and $n more (ai --status lists the project's changes)."
     [ -z "$work_path" ] ||
 	echo "Once reviewed, ai --promote PATH in the project makes one the base version."
 }
@@ -1109,14 +1121,28 @@ find_project() {
 
 # show_home_layer LAYER: the changes in LAYER, a project's layer of the
 # agent's home, summed up two levels down (.claude/projects/...), if
-# any.  Overlayfs records deletions as whiteouts: character devices.
+# any, but those of $HOME_IGNORE, only counted.  Overlayfs records
+# deletions as whiteouts: character devices.
 show_home_layer() {
-    local layer=$1
-    if [ -n "$(find "$layer" -mindepth 1 ! -type d -print -quit 2>/dev/null)" ]; then
-	# 2>/dev/null: the agent may leave unreadable directories.
-	echo "Home layer: $(du -sh -- "$layer" 2>/dev/null | cut -f1), changes to the agent's home:"
+    local layer=$1 entry ignored=0
+    local -a entries shown=()
+    # 2>/dev/null: the agent may leave unreadable directories.
+    mapfile -d '' -t entries < <(
 	find "$layer" -mindepth 1 \( -type c -printf 'd %P\0' -o \
-	     ! -type d -printf 'f %P\0' \) 2>/dev/null |
+	     ! -type d -printf 'f %P\0' \) 2>/dev/null
+    )
+    [ ${#entries[@]} -gt 0 ] || return 0
+    for entry in "${entries[@]}"; do
+	if home_match "${entry#? }" "${HOME_IGNORE[@]}" &&
+	       ! home_match "${entry#? }" "${HOME_TRIGGERS[@]}"; then
+	    ignored=$((ignored + 1))
+	else
+	    shown+=("$entry")
+	fi
+    done
+    echo "Home layer: $(du -sh -- "$layer" 2>/dev/null | cut -f1), changes to the agent's home:"
+    if [ ${#shown[@]} -gt 0 ]; then
+	printf '%s\0' "${shown[@]}" |
 	    LC_ALL=C sort -z -k2 |
 	    LC_ALL=C sed -z 's/[[:cntrl:]]/?/g' |
 	    awk 'BEGIN { RS = "\0" }
@@ -1136,6 +1162,8 @@ show_home_layer() {
 	                       printf "  %s%s\n", key, deleted[key] ? ": deleted" : ""
 	               } }'
     fi
+    [ "$ignored" -eq 0 ] ||
+	echo "  and $ignored more in HOME_IGNORE (histories, caches...)."
 }
 
 # show_status [DIR]: what ai keeps for the project containing the current
