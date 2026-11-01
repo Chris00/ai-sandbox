@@ -113,6 +113,25 @@ declare -A PRIVATE_IF=(
 # check at exit reports new and changed ones (and new repos).
 TRIGGERS=(.git "${PRIVATE[@]}" "${READONLY[@]}")
 
+# Files of the agent's home that make code run, or steer the agent, in
+# its later sessions: changes to them during a session are reported at
+# exit.  Paths relative to the home; "*" matches any characters,
+# including "/", and a directory covers what it contains.
+# (~/.claude.json, which holds Claude Code's MCP servers, is left out:
+# Claude Code rewrites it at every start.)
+HOME_TRIGGERS=(
+    .profile .bashrc .bash_profile .bash_login .bash_logout .inputrc
+    .zshenv .zprofile .zshrc .zlogin .config/fish
+    .local/bin                          # on the PATH
+    .gitconfig .config/git              # aliases, hooks, helpers
+    .ssh/config .ssh/rc                 # ProxyCommand, LocalCommand
+    .npmrc .config/pip .pip .cargo/config .cargo/config.toml
+    # Claude Code: hooks, permissions, instructions and its own program.
+    .claude/settings.json .claude/settings.local.json .claude/CLAUDE.md
+    .claude/hooks .claude/commands .claude/agents .claude/skills
+    .claude/plugins .claude/projects/*/memory .local/share/claude
+)
+
 # List of destination constraints of the form ‘[user@]dest-hostname’
 # for the $AI_SSH_KEY.  An empty list means that it is unrestricted
 # (it can be used anywhere it's accepted).
@@ -511,6 +530,68 @@ host_triggers() {
 	fi
 	printf '%s\t%s\0' "$item" "$(sort -n <<<"$times" | tail -n 1)"
     done < <(find "$1" \( "${trigger_expr[@]}" \) -prune -print0)
+}
+
+# home_snapshot DIR [PATTERN...]: the files in DIR, the agent's home or
+# a layer of it (only those matching the glob PATTERNs, if given), as
+# sorted NUL-separated "TYPE<TAB>CTIME<TAB>PATH", PATH being relative to
+# DIR, and TYPE "d" for a whiteout, which records a deletion in a layer,
+# "f" otherwise.  CTIME is the time of the latest change: the sandbox
+# can't set it back.  It is 0 for whiteouts: overlayfs makes them hard
+# links to one file, whose ctime changes at each mount.
+home_snapshot() {
+    local dir=$1 pat
+    local -a starts=()
+    shift
+    (
+	cd -- "$dir" 2>/dev/null || exit 0
+	if [ $# -eq 0 ]; then
+	    starts=(.)
+	else
+	    shopt -s nullglob
+	    for pat; do
+		starts+=($pat)      # unquoted: expand the globs
+	    done
+	    [ ${#starts[@]} -gt 0 ] || exit 0
+	fi
+	find "${starts[@]}" -mindepth 0 \( -type c -printf 'd\t0\t%p\0' -o \
+	     ! -type d -printf 'f\t%C@\t%p\0' \) 2>/dev/null
+    ) | LC_ALL=C sed -z 's|^\(.\t[^\t]*\t\)\./|\1|' | LC_ALL=C sort -z
+}
+
+# is_home_trigger PATH: true if PATH, relative to the agent's home, is
+# one of the $HOME_TRIGGERS or in one.
+is_home_trigger() {
+    local pat
+    for pat in "${HOME_TRIGGERS[@]}"; do
+	# shellcheck disable=SC2053     # $pat is a glob
+	[[ $1 == $pat || $1 == $pat/* ]] && return 0
+    done
+    return 1
+}
+
+# home_changes: report the changes to the agent's home during the
+# session, compared with $tmp/home.before, if any touches the
+# $HOME_TRIGGERS.
+home_changes() {
+    local type ctime path n=0
+    local -a found=()
+    while IFS=$'\t' read -r -d '' type ctime path; do
+	if is_home_trigger "$path"; then
+	    [ "$type" = d ] && path="$path (deleted)"
+	    found+=("$path")
+	else
+	    n=$((n + 1))
+	fi
+    done < <(LC_ALL=C comm -z -13 "$tmp/home.before" <(home_snapshot "${home_watch[@]}"))
+    [ ${#found[@]} -gt 0 ] || return 0
+    if [ -n "$work_path" ]; then
+	echo "Changed in the agent's home, in this project only (in $(rel_to_home "$project/home")):"
+    else
+	echo "Changed in the agent's base home, seen by every project (in $(rel_to_home "$AIHOME")):"
+    fi
+    printf '%s\n' "${found[@]}" | indent
+    [ "$n" -eq 0 ] || echo "  and $n other files (ai --status lists the project's changes)."
 }
 
 # Entries printed now by "$@" that are not in the snapshot file $1,
@@ -1138,7 +1219,7 @@ watch_pid=      # inotifywait, watching the work dir for new tool files
 watch_reader=   # the function reporting what it sees
 
 cleanup() {
-    local links triggers p
+    local links triggers home p
     [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
     [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
     if [ -n "$watch_pid" ]; then
@@ -1159,21 +1240,23 @@ cleanup() {
 	triggers=$(new_since "$tmp/triggers.before" host_triggers "$work_path" |
 		       cut -f1 |
 		       grep -vxF -f <(tr '\0' '\n' <"$tmp/protected" 2>/dev/null))
-	if [ -n "$links$triggers" ]; then
-	    {
-		echo "$(date '+%F %T') Session in $work_path:"
-		if [ -n "$links" ]; then
-		    echo "New symlinks out of the work dir (don't follow them blindly):"
-		    indent <<<"$links"
-		fi
-		if [ -n "$triggers" ]; then
-		    echo "New or changed files that can run code on the host (review before"
-		    echo "entering these directories, opening them in an editor or running"
-		    echo "Git, npm, Cargo... there):"
-		    indent <<<"$triggers"
-		fi
-	    } | tee -a "$HOME/AI/warnings.log" >&2
-	fi
+    fi
+    [ -f "$tmp/home.before" ] && home=$(home_changes)
+    if [ -n "$links$triggers$home" ]; then
+	{
+	    echo "$(date '+%F %T') Session in ${work_path:-$AIHOME}:"
+	    if [ -n "$links" ]; then
+		echo "New symlinks out of the work dir (don't follow them blindly):"
+		indent <<<"$links"
+	    fi
+	    if [ -n "$triggers" ]; then
+		echo "New or changed files that can run code on the host (review before"
+		echo "entering these directories, opening them in an editor or running"
+		echo "Git, npm, Cargo... there):"
+		indent <<<"$triggers"
+	    fi
+	    [ -z "$home" ] || printf '%s\n' "$home"
+	} | tee -a "$HOME/AI/warnings.log" >&2
     fi
     rm -rf -- "$tmp"
 }
@@ -1454,6 +1537,15 @@ fi
 slirp=$!
 
 # --- Run ----------------------------------------------------------------
+
+# For the report at exit on the agent's home: in a project, its whole
+# layer (its changes); otherwise, the $HOME_TRIGGERS of the base home.
+if [ -n "$work_path" ]; then
+    home_watch=("$project/home")
+else
+    home_watch=("$AIHOME" "${HOME_TRIGGERS[@]}")
+fi
+home_snapshot "${home_watch[@]}" >"$tmp/home.before"
 
 # The block pipe is opened read-write: read-only would wait for a
 # writer, and slirp4netns only opens it once bwrap has started.

@@ -69,8 +69,10 @@ The script also checks the host side, before and after each session:
   agent may have created or changed: `.envrc`, `.vscode/`,
   `.dir-locals.el`, `.npmrc`, `.cargo/`, `.husky/`, new `.git` repos,
   virtualenvs… Those protected at startup aren't reported, since the
-  agent couldn't change them. These warnings are also appended to
-  `~/AI/warnings.log`.
+  agent couldn't change them. It also reports the files of the agent's
+  home that run code or steer the agent in later sessions, if the
+  session changed them (see [The agent's home](#the-agents-home)).
+  These warnings are also appended to `~/AI/warnings.log`.
 
 
 ## Requirements
@@ -270,6 +272,29 @@ whole new version into that project only. Update in a session without
 `-w`. Likewise, log the agent in from a session without `-w`, so that
 all projects see the credentials: a login, or credentials the agent
 refreshes, during a project session stays in that project.
+
+At exit, `ai` reports the files of the agent's home changed during the
+session that make code run, or steer the agent, in its later sessions:
+shell profiles, `~/.local/bin`, Git's and SSH's configuration, package
+managers' settings, Claude Code's settings (hooks, permissions), its
+instructions (`CLAUDE.md`, the projects' memory) and its program. The
+list, `HOME_TRIGGERS`, is at the top of the script. For example:
+
+```
+2026-11-01 14:31:30 Session in /home/you/software/proj:
+Changed in the agent's home, in this project only (in ~/AI/projects/home-you-software-proj/home):
+  .bashrc
+  .claude/settings.json (deleted)
+  .claude/projects/-work-software-proj/memory/MEMORY.md
+  and 12 other files (ai --status lists the project's changes).
+```
+
+In a project, the change is in its `home/`: review it there, and
+delete the file to go back to the base version. After a session without
+`-w`, the report covers these files in the base home, which every
+project sees. Claude Code's `~/.claude.json`, which holds its MCP
+servers, isn't in the list: Claude Code rewrites it at every start, so
+it would always be reported.
 
 
 ## Read-only files
