@@ -33,7 +33,9 @@
 # In a project, the agent's home is an overlay: the base home ($AIHOME)
 # read-only, and the project's own changes on top, kept in its
 # directory.  What the agent leaves in its home (history, memory,
-# settings...) thus stays in the project.
+# settings...) thus stays in the project.  AI_PROJECT, set to the work
+# dir's path in the sandbox, tells the base home's files (.bashrc...)
+# that they run in a project.
 #
 # --ro PATTERN... (or --read-only) makes what matches the PATTERNs, up
 # to the next option or "--", read-only in the sandbox.  Without a "/",
@@ -140,12 +142,11 @@ AI_SSH_HOSTS=(github.com gitlab.com)
 # line, which every local user can read: they may hold secrets.
 AI_ENV=()
 AI_PROJECT_ENV=(
-    # Claude Code: update in the base home (ai without -w), for all
-    # projects.  An update in a project would only land in its layer of
-    # the home: a copy of the whole program.
-    DISABLE_AUTOUPDATER=1
-    # Github Copilot
-    COPILOT_AUTO_UPDATE=false
+    # Agents: update in the base home (ai without -w), for all projects.
+    # An update in a project would only land in its layer of the home:
+    # a copy of the whole program.
+    DISABLE_AUTOUPDATER=1               # Claude Code
+    COPILOT_AUTO_UPDATE=false           # GitHub Copilot CLI
 )
 
 # Your configuration: a bash file, sourced after the defaults above,
@@ -1444,6 +1445,9 @@ if [ -n "$work_path" ]; then
     args+=(
 	--bind "$work_path" "$work_mount"
 	--chdir "$work_mount"
+	# For the files of the base home, shared by all sessions, to tell
+	# a project session (e.g. in .bashrc: [ -n "$AI_PROJECT" ]).
+	--setenv AI_PROJECT "$work_mount"
     )
     # Before the other mounts in the work dir: a read-only bind of a
     # directory would otherwise cover the clones and private copies

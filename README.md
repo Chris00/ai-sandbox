@@ -267,10 +267,31 @@ home must not change under a running overlay, `ai` refuses to start a
 session without `-w` while project sessions run, and project sessions
 while it runs.
 
-For the same reason, Claude Code's automatic updates are turned off in
-projects (`DISABLE_AUTOUPDATER=1`, in `AI_PROJECT_ENV`, see
+For the same reason, the automatic updates of Claude Code and GitHub
+Copilot CLI are turned off in projects (`DISABLE_AUTOUPDATER=1` and
+`COPILOT_AUTO_UPDATE=false`, in `AI_PROJECT_ENV`, see
 [Configuration](#configuration)): an update there would copy the whole
 new version into that project only. Update in a session without `-w`.
+
+The base home's files are the same in every session, so they can't
+tell a project session from one without `-w` by themselves. For that,
+`ai` sets `AI_PROJECT`, in project sessions only, to the work
+directory's path in the sandbox (`/work/software/proj`). A shell
+profile can then act in projects only, for settings that an agent only
+reads from its configuration files. Codex, for one, has no environment
+variable to turn off its update prompt, but takes the setting on its
+command line:
+
+```bash
+# ~/AI/home/.bashrc
+if [ -n "$AI_PROJECT" ]; then
+    alias codex='codex -c check_for_update_on_startup=false'
+fi
+```
+
+An alias only applies in the interactive shell, not to `ai -w --
+codex`. For that, put a wrapper script named `codex` in a directory of
+the base home placed first in the `PATH` (set in `AI_ENV`).
 
 Likewise, log the agent in from a session without `-w`, so that all
 projects see the credentials. But a login refreshes its credentials
