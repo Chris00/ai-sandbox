@@ -118,8 +118,21 @@ TRIGGERS=(.git "${PRIVATE[@]}" "${READONLY[@]}")
 # (it can be used anywhere it's accepted).
 AI_SSH_HOSTS=(github.com gitlab.com)
 
+# safe STRING: STRING with its control characters, which could drive
+# your terminal, replaced by "?".  For what may come from the agent: the
+# names of files in the work dir, for one, so for every path shown.
+safe() {
+    local LC_ALL=C              # bytes: leave UTF-8 characters alone
+    printf '%s' "${1//[[:cntrl:]]/?}"
+}
+
+# indent: show the lines read, made `safe`, indented.
+indent() {
+    LC_ALL=C sed 's/[[:cntrl:]]/?/g; s/^/  /'
+}
+
 die() {
-    echo "ai: $*" >&2
+    echo "ai: $(safe "$*")" >&2
     exit 1
 }
 
@@ -277,11 +290,13 @@ git() {
     /usr/bin/git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
+# rel_to_pwd PATH, rel_to_home PATH: PATH to show, relative to the
+# current directory or to your home if under it, and `safe`.
 rel_to_pwd() {
     case $1 in
 	"$PWD")   echo . ;;
-	"$PWD"/*) echo "./${1#"$PWD"/}" ;;
-	*)        echo "$1" ;;  # not under the current directory
+	"$PWD"/*) safe "./${1#"$PWD"/}"; echo ;;
+	*)        safe "$1"; echo ;;  # not under the current directory
     esac
 }
 
@@ -294,8 +309,8 @@ glob_escape() {
 rel_to_home() {
     case $1 in
 	"$HOME")   echo "~" ;;
-	"$HOME"/*) echo "~/${1#"$HOME"/}" ;;
-	*)         echo "$1" ;;  # not under $HOME
+	"$HOME"/*) safe "~/${1#"$HOME"/}"; echo ;;
+	*)         safe "$1"; echo ;;  # not under $HOME
     esac
 }
 
@@ -376,7 +391,7 @@ outside_symlinks() {
     while IFS= read -r -d '' f; do
 	case $(realpath -m -- "$f") in
 	    "$1"|"$1"/*) ;;
-	    *) printf '%s → %s\0' "$(rel_to_pwd "$f")" "$(readlink -- "$f")" ;;
+	    *) printf '%s → %s\0' "$(rel_to_pwd "$f")" "$(safe "$(readlink -- "$f")")" ;;
 	esac
     done < <(find "$1" \( "${hidden[@]}" \) -prune -o -type l -print0)
 }
@@ -405,7 +420,8 @@ unset icon
 # report_trigger DIR PATH: a new $TRIGGERS entry PATH appeared in the
 # work dir DIR.  Log it and, when possible, show a desktop notification.
 report_trigger() {
-    local dir=$1 path=$2 where
+    local dir=$1 path where
+    path=$(safe "$2")
     where="${dir##*/}/${path#"$dir"/}"
     printf '%s New during the session in %s: %s\n' \
 	   "$(date '+%F %T')" "$dir" "$path" >>"$HOME/AI/warnings.log"
@@ -930,13 +946,6 @@ find_project() {
     printf '%s' "$d"
 }
 
-# safe STRING: STRING with its control characters, which could drive
-# your terminal, replaced by "?".  For what comes from the agent.
-safe() {
-    local LC_ALL=C              # bytes: leave UTF-8 characters alone
-    printf '%s' "${1//[[:cntrl:]]/?}"
-}
-
 # show_status: what ai keeps for the project containing the current
 # directory (the project root may be a super-directory), if any.  The
 # branch names and paths it shows go through `safe`: they come from the
@@ -1155,13 +1164,13 @@ cleanup() {
 		echo "$(date '+%F %T') Session in $work_path:"
 		if [ -n "$links" ]; then
 		    echo "New symlinks out of the work dir (don't follow them blindly):"
-		    sed 's/^/  /' <<<"$links"
+		    indent <<<"$links"
 		fi
 		if [ -n "$triggers" ]; then
 		    echo "New or changed files that can run code on the host (review before"
 		    echo "entering these directories, opening them in an editor or running"
 		    echo "Git, npm, Cargo... there):"
-		    sed 's/^/  /' <<<"$triggers"
+		    indent <<<"$triggers"
 		fi
 	    } | tee -a "$HOME/AI/warnings.log" >&2
 	fi
@@ -1334,19 +1343,19 @@ if [ -n "$work_path" ]; then
     links=$(outside_hardlinks "$work_path")
     if [ -n "$links" ]; then
 	echo "Hard-linked outside the work dir, or to read-only files in it (the sandbox could modify them through these):" >&2
-	sed 's/^/  /' <<<"$links" >&2
+	indent <<<"$links" >&2
 	confirm "Continue anyway?" || exit 1
     fi
     mounts=$(inner_mounts "$work_path")
     if [ -n "$mounts" ]; then
 	echo "File systems mounted inside the work dir (exposed too):" >&2
-	sed 's/^/  /' <<<"$mounts" >&2
+	indent <<<"$mounts" >&2
 	confirm "Continue anyway?" || exit 1
     fi
     sockets=$(inner_sockets "$work_path")
     if [ -n "$sockets" ]; then
 	echo "Unix sockets or named pipes in the work dir (the sandbox could talk to the programs behind them):" >&2
-	sed 's/^/  /' <<<"$sockets" >&2
+	indent <<<"$sockets" >&2
 	confirm "Continue anyway?" || exit 1
     fi
 

@@ -591,7 +591,9 @@ untrusted code harmless.
   sequences. Some terminals let a program set your clipboard (OSC 52),
   so a paste could contain something you didn't copy. Terminals based
   on VTE (GNOME Terminal, Ptyxis) ignore OSC 52; in others, disable
-  clipboard writes in the settings if possible.
+  clipboard writes in the settings if possible. The names `ai` itself shows,
+  such as paths in the work directory or branch names, may come from
+  the agent: their control characters are replaced by `?`.
 - **Disk space.** It isn't limited. `~/AI` and the work directory share
   your disk. Put `~/AI` on a separate file system, or use quotas, if
   that matters.
