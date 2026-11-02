@@ -84,6 +84,8 @@ table inet ai {
 }'
 
 LOCKDIR="$HOME/AI/locks"
+# The warnings of the checks, with their time.
+AI_LOG="$HOME/AI/warnings.log"
 
 # Directories never exposed: no work dir may be one of them, be in one
 # or contain one.  Besides these, ai refuses /, your whole home, its
@@ -558,7 +560,7 @@ report_trigger() {
     path=$(safe "$2")
     where="${dir##*/}/${path#"$dir"/}"
     printf '%s New during the session in %s: %s\n' \
-	   "$(date '+%F %T')" "$dir" "$path" >>"$HOME/AI/warnings.log"
+	   "$(date '+%F %T')" "$dir" "$path" >>"$AI_LOG"
     if command -v notify-send >/dev/null; then
 	notify-send -a ai -u critical -i "$NOTIFY_ICON" \
 		    "ai: new ${path##*/}" \
@@ -1570,7 +1572,7 @@ if [ -n "$work_path" ]; then
 	    die "Refusing to expose configuration files ($work_path)." ;;
     esac
     # Where ai's own files are, wherever your configuration put them.
-    for p in "$AIHOME" "$PROJECTS" "$LOCKDIR" "$AI_CONFIG" "$AI_SSH_KEY"; do
+    for p in "$AIHOME" "$PROJECTS" "$LOCKDIR" "$AI_LOG" "$AI_CONFIG" "$AI_SSH_KEY"; do
 	overlaps "$work_path" "$p" &&
 	    die "Refusing to expose the sandbox's own files ($p)."
     done
@@ -1579,10 +1581,11 @@ if [ -n "$work_path" ]; then
 	    die "Refusing to expose $p (FORBID_WORK)."
     done
 
+    # The home lock first: a session refused for it changes nothing.
+    lock_home shared
     lock_work_path "$work_path"
     register_project "$work_path"
     migrate_old_layout "$work_path"
-    lock_home shared
 else
     [ ${#read_only[@]} -eq 0 ] ||
 	die "--ro needs -w: the patterns are in the work directory."
@@ -1651,7 +1654,7 @@ cleanup() {
 		indent <<<"$triggers"
 	    fi
 	    [ -z "$home" ] || printf '%s\n' "$home"
-	} | tee -a "$HOME/AI/warnings.log" >&2
+	} | tee -a "$AI_LOG" >&2
     fi
     rm -rf -- "$tmp"
 }
@@ -1965,7 +1968,8 @@ exec 11< <(for e in "${env_list[@]}"; do
 	   done)
 
 # The block pipe is opened read-write: read-only would wait for a
-# writer, and slirp4netns only opens it once bwrap has started.
+# writer, and the network subshell only opens it once slirp4netns is
+# ready.
 /usr/bin/bwrap --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" --args 11 "${cmd[@]}" \
 	       3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&-
 exit $?
