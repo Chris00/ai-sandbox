@@ -1516,7 +1516,9 @@ list_projects() {
     [ ${#names[@]} -gt 0 ] || echo "No projects yet: ai -w makes the current directory one."
     for i in "${!names[@]}"; do
 	IFS=$'\t' read -r size when state <<<"${rows[i]}"
-	printf '%-*s  %5s  %s%s\n' "$width" "${names[i]}" "$size" "$when" "${state:+  $state}"
+	# Padded by hand: printf counts bytes, ${#...} characters.
+	printf '%s%*s  %5s  %s%s\n' "${names[i]}" $((width - ${#names[i]})) "" \
+	       "$size" "$when" "${state:+  $state}"
     done
     # The old layout: remove with migrate_old_layout.
     if [ -d "$HOME/AI/work" ] || [ -d "$HOME/AI/shadow" ]; then
@@ -1787,7 +1789,9 @@ args=(
 
 if [ -n "$ssh" ]; then
     args+=(
-	--ro-bind-try "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts"
+	# Your known hosts, as the system's: a mount point in the agent's
+	# home would be a change to it (in each project's layer).
+	--ro-bind-try "$HOME/.ssh/known_hosts" /etc/ssh/ssh_known_hosts
 	--bind "$agent_sock" /run/ssh-agent.sock
 	--setenv SSH_AUTH_SOCK /run/ssh-agent.sock
     )

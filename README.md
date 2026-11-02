@@ -543,7 +543,9 @@ purpose: hence the setting for your own machine in
 `~/.ssh/id_ed25519_ai` in it. Your own agent and keys stay out of the
 sandbox. The agent can use the key while the session runs, but can't
 copy it, and the agent stops with the session. Your `known_hosts` is
-available read-only.
+available read-only, as the sandbox's system-wide list of known hosts
+(`/etc/ssh/ssh_known_hosts`), so that it leaves nothing in the agent's
+home.
 
 The agent only uses the key for the hosts listed in `AI_SSH_HOSTS`
 (`github.com` and `gitlab.com` by default), which you can set in your
