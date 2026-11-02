@@ -1585,7 +1585,10 @@ watch_reader=   # the function reporting what it sees
 
 cleanup() {
     local links triggers home p
-    [ -n "$slirp" ] && kill "$slirp" 2>/dev/null
+    if [ -n "$slirp" ]; then
+	kill "$slirp" 2>/dev/null
+	wait "$slirp" 2>/dev/null       # it stops slirp4netns and reaps it
+    fi
     [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
     if [ -n "$watch_pid" ]; then
 	kill "$watch_pid" 2>/dev/null
@@ -1630,7 +1633,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-mkfifo "$tmp/info" "$tmp/block" || exit 1
+mkfifo "$tmp/info" "$tmp/block" "$tmp/ready" || exit 1
 # slirp4netns provides a DNS forwarder at 10.0.2.3.
 printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
 
@@ -1857,8 +1860,9 @@ fi
 # host's localhost (databases, dev servers, CUPS...).
 #
 # Wait for bwrap to report the sandbox PID, then attach the network to
-# it.  slirp4netns writes to the block pipe when ready, which releases
-# bwrap.
+# it.  Once slirp4netns says it's ready, write to the block pipe, which
+# releases bwrap.  If it stops before, kill the sandbox: bwrap would
+# otherwise wait forever.
 #
 # Both the firewall and slirp4netns must act from the user namespace
 # that owns the sandbox's network namespace, where they have the rights
@@ -1897,12 +1901,19 @@ os.execvp(cmd[0], cmd)
     python3 -I -c "$JOIN_NS" "$pid" net "$NFT" -f - <<<"$NFT_RULES" ||
 	fail "could not install the firewall rules"
 
-    exec python3 -I -c "$JOIN_NS" "$pid" user \
-	 slirp4netns --configure --mtu=65520 --disable-host-loopback \
-	 --enable-sandbox --enable-seccomp \
-	 --ready-fd=3 --netns-type=path "/proc/$pid/ns/net" tap0 \
-	 3>"$tmp/block" >/dev/null \
-	 2> >(grep --line-buffered -v -E '^(sent tapfd=[0-9]+ for tap0|received tapfd=[0-9]+)$' >&2)
+    python3 -I -c "$JOIN_NS" "$pid" user \
+	    slirp4netns --configure --mtu=65520 --disable-host-loopback \
+	    --enable-sandbox --enable-seccomp \
+	    --ready-fd=3 --netns-type=path "/proc/$pid/ns/net" tap0 \
+	    3>"$tmp/ready" >/dev/null \
+	    2> >(grep --line-buffered -v -E '^(sent tapfd=[0-9]+ for tap0|received tapfd=[0-9]+)$' >&2) &
+    child=$!
+    # The script's cleanup stops this subshell: stop slirp4netns too.
+    trap 'kill "$child" 2>/dev/null; wait "$child"; exit' TERM HUP
+    # slirp4netns writes "1" when ready; it closes the pipe if it fails.
+    read -r -n 1 _ <"$tmp/ready" || fail "slirp4netns stopped"
+    echo >"$tmp/block"
+    wait "$child"
 ) 7>&- 9>&- &
 slirp=$!
 
