@@ -227,9 +227,13 @@ ai --reset | --forget [DIR] | --list
   Everything after `--` is passed to it unchanged, options included:
   `ai -w -- ls -l`.
 
-For safety, `ai` refuses `/`, your whole home directory, hidden
-directories in your home, `~/AI` itself and `~/Personal` as work
-directories. Only one session at a time may use a given directory.
+For safety, `ai` refuses as work directories `/`, your whole home
+directory, and the hidden directories of your home with what they
+contain. It also refuses any directory that is, contains or is inside
+one of its own files (`~/AI`, the agent's SSH key, wherever your
+configuration puts them) or a directory of `FORBID_WORK` (`~/Personal`
+by default; see [Configuration](#configuration)). Only one session at
+a time may use a given directory.
 
 `ai` keeps what it needs for each work directory, or *project*, in a
 directory of its own (see [Files](#files)).  Projects can't overlap:
@@ -687,6 +691,7 @@ READONLY+=(.myrc)                    # see Tool files
 PRIVATE+=(_build)
 PRIVATE_IF[_build]=dune-project
 AI_SSH_HOSTS=(github.com)            # replaces the default list
+FORBID_WORK+=("$HOME/Documents/taxes")
 ```
 
 Use `+=` to add to a list: `=` replaces it, defaults included. Other

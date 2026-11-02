@@ -85,6 +85,12 @@ table inet ai {
 
 LOCKDIR="$HOME/AI/locks"
 
+# Directories never exposed: no work dir may be one of them, be in one
+# or contain one.  Besides these, ai refuses /, your whole home, its
+# hidden directories, and ai's own files: $AIHOME, $PROJECTS... and the
+# agent's SSH key.
+FORBID_WORK=("$HOME/Personal")
+
 # Files and directories in the work dir that make tools on the host run
 # code, often just by entering the directory, opening it in an editor
 # or building the project.  In the sandbox:
@@ -424,6 +430,22 @@ rel_to_home() {
 	"$HOME"/*) safe "~/${1#"$HOME"/}"; echo ;;
 	*)         safe "$1"; echo ;;  # not under $HOME
     esac
+}
+
+# inside A B: true if A, a `realpath`, is B or in it.  B may not
+# exist; its symlinks are resolved.
+inside() {
+    local b
+    b=$(realpath -m -- "$2") || return 1
+    [[ $1 == "$b" || $1 == "$b"/* ]]
+}
+
+# overlaps A B: true if A, a `realpath`, is B or in it or contains B.
+# B may not exist; its symlinks are resolved.
+overlaps() {
+    local b
+    b=$(realpath -m -- "$2") || return 1
+    [[ $1 == "$b" || $1 == "$b"/* || $b == "$1"/* ]]
 }
 
 # Where a .git symlink or gitfile ("gitdir: PATH") points to.
@@ -1546,11 +1568,16 @@ if [ -n "$work_path" ]; then
     case $work_path/ in
 	"$home"/.*)
 	    die "Refusing to expose configuration files ($work_path)." ;;
-	"$home/AI"/*)
-	    die "Refusing to expose the sandbox's own files ($work_path)." ;;
-	"$home/Personal"/*)
-	    die "Refusing to expose your personal files ($work_path)." ;;
     esac
+    # Where ai's own files are, wherever your configuration put them.
+    for p in "$AIHOME" "$PROJECTS" "$LOCKDIR" "$AI_CONFIG" "$AI_SSH_KEY"; do
+	overlaps "$work_path" "$p" &&
+	    die "Refusing to expose the sandbox's own files ($p)."
+    done
+    for p in "${FORBID_WORK[@]}"; do
+	overlaps "$work_path" "$p" &&
+	    die "Refusing to expose $p (FORBID_WORK)."
+    done
 
     lock_work_path "$work_path"
     register_project "$work_path"
@@ -1819,13 +1846,12 @@ if [ -n "$work_path" ]; then
 	    /*) pycache=$(realpath -m -- "$PYTHONPYCACHEPREFIX") ;;
 	    *)  pycache=$work_path ;;
 	esac
-	case $pycache/ in
-	    "$work_path"/*|"$home/AI"/*)
-		echo "Warning: PYTHONPYCACHEPREFIX is not an absolute path outside the work dir:" >&2
-		echo "  Python on your machine would use the bytecode the agent leaves in __pycache__." >&2
-		echo "  Set it in your shell profile, e.g. export PYTHONPYCACHEPREFIX=\"\$HOME/.cache/pycache\"" >&2
-		;;
-	esac
+	if inside "$pycache" "$work_path" || inside "$pycache" "$AIHOME" ||
+	       inside "$pycache" "$PROJECTS"; then
+	    echo "Warning: PYTHONPYCACHEPREFIX is not an absolute path outside the work dir and the agent's directories:" >&2
+	    echo "  Python on your machine would use the bytecode the agent leaves in __pycache__." >&2
+	    echo "  Set it in your shell profile, e.g. export PYTHONPYCACHEPREFIX=\"\$HOME/.cache/pycache\"" >&2
+	fi
     fi
 
     # Snapshots for the checks at exit, taken after protect_repos, whose
