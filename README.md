@@ -85,11 +85,12 @@ The script also checks the host side, before and after each session:
 - `~/AI` on a file system with user extended attributes, which
   overlayfs needs (ext4, Btrfs, XFS… but not NFS)
 - [slirp4netns](https://github.com/rootless-containers/slirp4netns)
-- util-linux ≥ 2.39 (`nsenter --user-parent`, `lsns`, `findmnt`, `flock`)
+- util-linux (`findmnt`, `flock`)
 - `nftables` (`nft`), with the `nf_tables` kernel module loaded
 - GNU coreutils and findutils, `awk`, Git
-- Python 3 with libseccomp's bindings (`python3-seccomp` on Debian
-  and Ubuntu, `libseccomp-python` on Fedora)
+- Python ≥ 3.12 (`os.setns`), with libseccomp's bindings
+  (`python3-seccomp` on Debian and Ubuntu, `libseccomp-python` on
+  Fedora)
 - for `--ssh`: OpenSSH ≥ 8.9 (destination-restricted keys)
 - for the warnings during the session (optional): `inotifywait`
   (inotify-tools) and `notify-send` (libnotify). Without the first,

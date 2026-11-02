@@ -1518,18 +1518,16 @@ esac
     die "bubblewrap is too old: version 0.10 or later is needed (--overlay)."
 command -v slirp4netns >/dev/null ||
     die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
-command -v nsenter >/dev/null ||
-    die "nsenter is not installed (e.g. 'apt install util-linux')."
-nsenter --help | grep -q -- --user-parent ||
-    die "nsenter is too old, it does not support '--user-parent'."
-command -v lsns >/dev/null && command -v findmnt >/dev/null ||
-    die "lsns or findmnt is missing (e.g. 'apt install util-linux')."
+command -v findmnt >/dev/null && command -v flock >/dev/null ||
+    die "findmnt or flock is missing (e.g. 'apt install util-linux')."
 command -v systemd-escape >/dev/null ||
     die "systemd-escape is missing (it comes with systemd)."
 command -v awk >/dev/null ||
     die "awk is not installed (e.g. 'apt install mawk')."
 NFT=$(PATH=$PATH:/usr/sbin:/sbin command -v nft) ||
     die "nft is not installed (e.g. 'apt install nftables')."
+python3 -c 'import os; os.setns' 2>/dev/null ||
+    die "Python 3.12 or later is needed (os.setns)."
 python3 -c 'import seccomp' 2>/dev/null ||
     die "libseccomp's Python bindings are missing (e.g. 'apt install python3-seccomp')."
 
@@ -1861,6 +1859,25 @@ fi
 # Wait for bwrap to report the sandbox PID, then attach the network to
 # it.  slirp4netns writes to the block pipe when ready, which releases
 # bwrap.
+#
+# Both the firewall and slirp4netns must act from the user namespace
+# that owns the sandbox's network namespace, where they have the rights
+# to configure it.  bwrap moves the sandbox itself into a namespace
+# nested in that one, at a time we can't know.  JOIN_NS PID [net] CMD...
+# asks the kernel for the owner (ioctl NS_GET_USERNS on the network
+# namespace), joins it, and the network namespace too with "net", then
+# runs CMD, keeping your credentials.  Python's own file descriptors
+# aren't passed on to CMD.
+JOIN_NS='
+import fcntl, os, sys
+NS_GET_USERNS = 0xb701                  # linux/nsfs.h
+pid, where, *cmd = sys.argv[1:]
+net = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
+os.setns(fcntl.ioctl(net, NS_GET_USERNS), os.CLONE_NEWUSER)
+if where == "net":
+    os.setns(net, os.CLONE_NEWNET)
+os.execvp(cmd[0], cmd)
+'
 (
     fail() {
 	echo "ai: network setup failed: $*" >&2
@@ -1875,26 +1892,12 @@ fi
 	fi
     done <"$tmp/info"
     [ -n "$pid" ] || exit 1
-    # The user namespace owning the sandbox's network namespace.  bwrap
-    # later moves the sandbox into a namespace nested in it.
-    owner=$(lsns -t net -p "$pid" -n -o ONS) || fail "lsns"
-    owner="user:[${owner//[[:space:]]/}]"
-    for _ in {1..200}; do
-	[ "$(readlink "/proc/$pid/ns/user")" != "$owner" ] && break
-	sleep 0.01
-    done
-    if [ "$(readlink "/proc/$pid/ns/user")" != "$owner" ]; then
-	userns=(--user --user-parent)    # nested: join its parent
-    else
-	userns=(--user)                  # not nested (yet)
-    fi
     # Firewall in the sandbox's network namespace, set as root of the
     # namespace that owns it: the sandbox cannot change it.
-    nsenter --target "$pid" "${userns[@]}" --preserve-credentials \
-	    --net="/proc/$pid/ns/net" "$NFT" -f - <<<"$NFT_RULES" ||
+    python3 -I -c "$JOIN_NS" "$pid" net "$NFT" -f - <<<"$NFT_RULES" ||
 	fail "could not install the firewall rules"
 
-    exec nsenter --target "$pid" "${userns[@]}" --preserve-credentials \
+    exec python3 -I -c "$JOIN_NS" "$pid" user \
 	 slirp4netns --configure --mtu=65520 --disable-host-loopback \
 	 --enable-sandbox --enable-seccomp \
 	 --ready-fd=3 --netns-type=path "/proc/$pid/ns/net" tap0 \
