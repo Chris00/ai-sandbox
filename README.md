@@ -3,8 +3,8 @@
 
 `ai` runs an AI coding agent (or any untrusted tool) in a
 [bubblewrap](https://github.com/containers/bubblewrap) sandbox on Linux.
-The agent gets a working directory and a home of its own, and can reach
-the internet. It can't touch the rest of your files, your Git
+The agent gets a working directory, a home of its own for each project,
+and can reach the internet. It can't touch the rest of your files, your Git
 history, your local network, your SSH keys or the services running on
 your machine.
 
@@ -15,12 +15,24 @@ injection* is the first risk of the [OWASP Top 10 for LLM Applications
 (LLM01:2026; see the [OWASP
 page](https://genai.owasp.org/resource/owasp-genai-llm-top-10-2026/)),
 and it [can't be reliably prevented in the agent
-itself](https://arxiv.org/abs/2605.17634).  So `ai` doesn't rely on the
-agent behaving: it limits what a manipulated agent can do, the concern
-of *Excessive Agency* (LLM03:2026, which [rose from sixth to
+itself](https://arxiv.org/abs/2605.17634).  An additional concern is
+*Excessive Agency* (LLM03:2026), which [rose from sixth to
 third](https://cloudsecurityalliance.org/blog/2026/10/21/the-owasp-top-10-for-llm-applications-2026-what-changed-and-why-it-matters)
-in this edition).  Your history and the rest of your system stay out of
-its reach.  It doesn't stop everything, notably sending data out (see
+in this edition of the list.  Instead of relying on the agent
+behaving, `ai` protects you in two ways:
+
+- it makes sure your history and the rest of your system stay out of
+  its reach;
+- it keeps an injection from spreading to your other projects.  An
+  injected instruction tries to last: written into the agent's memory,
+  its instructions, its settings or a shell profile, it would act
+  again in every later session, on any project.  So in each project,
+  the agent's home is an overlay: what the agent writes there stays in
+  that project.  At exit, `ai` reports the changes that could act
+  again; you review them and choose which ones all projects get
+  (`ai --promote`).
+
+`ai` doesn't stop everything, notably sending data out (see
 [Limitations](#limitations)).
 
 ```console
