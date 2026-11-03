@@ -427,6 +427,22 @@ that the project deleted and created again, which replaces the base's
 as a whole: copy what you need from it by hand.
 
 
+## Notifications from the agent
+
+An agent can tell you, with a desktop notification, that it has
+finished or needs you, so you don't have to check its terminal. It
+reports it from one of its hooks, by writing a word such as `stop` or
+`permission_prompt` to the pipe `$AI_NOTIFY`; `ai`, outside the
+sandbox, shows the notification. Only a few known words are accepted,
+and the text is `ai`'s own: the agent can choose the event, never what
+the notification says, and nothing gives it access to your desktop.
+Each kind of notification is shown at most once every 5 seconds.
+
+The hooks go in the base home, for all projects. See
+[docs/notifications.md](docs/notifications.md) for Claude Code, Codex,
+GitHub Copilot CLI and Kimi CLI.
+
+
 ## Read-only files
 
 `--ro` protects parts of the work directory that the agent should read
