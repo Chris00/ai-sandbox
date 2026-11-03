@@ -574,8 +574,8 @@ find_icon() {
     done
     printf '%s' "$2"
 }
-NOTIFY_ICON=$(find_icon ai-sandbox-warning dialog-warning)
-AGENT_ICON=$(find_icon ai-sandbox dialog-information)
+TRIGGER_ICON=$(find_icon ai-sandbox-warning dialog-warning)
+AGENT_EVENT_ICON=$(find_icon ai-sandbox dialog-information)
 
 # markup TEXT: TEXT for the body of a notification, which some
 # notification servers read as markup (<b>, <a href>...).
@@ -594,7 +594,7 @@ report_trigger() {
     printf '%s New during the session in %s: %s\n' \
 	   "$(date '+%F %T')" "$dir" "$path" >>"$AI_LOG"
     if command -v notify-send >/dev/null; then
-	notify-send -a ai -u critical -i "$NOTIFY_ICON" \
+	notify-send -a ai -u critical -i "$TRIGGER_ICON" \
 		    "ai: new ${path##*/}" \
 		    "$(markup "$where") was just created, by you or the agent. Review it before using the project on your machine." \
 		    2>/dev/null
@@ -615,7 +615,7 @@ watch_agent_events() {
 	(( SECONDS - ${last[$event]:--5} >= 5 )) || continue
 	last[$event]=$SECONDS
 	command -v notify-send >/dev/null &&
-	    notify-send -a ai -i "$AGENT_ICON" "ai: $name" \
+	    notify-send -a ai -i "$AGENT_EVENT_ICON" "ai: $name" \
 			"The agent ${AGENT_EVENTS[$event]}." 2>/dev/null
     done
 }
@@ -1663,9 +1663,9 @@ tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
 # that runs slirp4netns, so the EXIT trap knows what to kill.
 slirp=
 agent_pid=
-watch_pid=      # inotifywait, watching the work dir for new tool files
-watch_reader=   # the function reporting what it sees
-notify_pid=     # watch_agent_events, reading the agent's events
+watch_pid=        # inotifywait, watching the work dir for new tool files
+watch_reader=     # the function reporting what it sees
+agent_events_pid= # watch_agent_events, reading the agent's events
 
 cleanup() {
     local links triggers home p
@@ -1678,9 +1678,9 @@ cleanup() {
 	kill "$watch_pid" 2>/dev/null
 	wait "$watch_reader" 2>/dev/null   # it ends with inotifywait's output
     fi
-    if [ -n "$notify_pid" ]; then
-	kill "$notify_pid" 2>/dev/null
-	wait "$notify_pid" 2>/dev/null
+    if [ -n "$agent_events_pid" ]; then
+	kill "$agent_events_pid" 2>/dev/null
+	wait "$agent_events_pid" 2>/dev/null
     fi
     # Mount points created in your tree for absent PRIVATE entries.
     if [ -f "$tmp/created" ]; then
@@ -2019,7 +2019,7 @@ if [ -n "$work_path" ]; then
 else
     watch_agent_events "the agent's home" <>"$tmp/notify" 7>&- 9>&- &
 fi
-notify_pid=$!
+agent_events_pid=$!
 
 # For the report at exit on the agent's home: in a project, its whole
 # layer (its changes); otherwise, the $HOME_TRIGGERS of the base home.
