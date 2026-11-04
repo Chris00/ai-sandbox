@@ -605,9 +605,12 @@ AGENT_EVENT_ICON=$(find_icon ai-sandbox dialog-information)
 # markup TEXT: TEXT for the body of a notification, which some
 # notification servers read as markup (<b>, <a href>...).
 markup() {
-    local t=${1//&/&amp;}
-    t=${t//</&lt;}
-    printf '%s' "${t//>/&gt;}"
+    # Quoted: since bash 5.2, an unquoted & in the replacement stands for
+    # the matched text.
+    local amp='&amp;' lt='&lt;' gt='&gt;' t
+    t=${1//&/"$amp"}
+    t=${t//</"$lt"}
+    printf '%s' "${t//>/"$gt"}"
 }
 
 # valid_utf8 TEXT: TEXT without the bytes that aren't UTF-8: notify-send

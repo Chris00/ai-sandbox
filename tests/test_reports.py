@@ -3,7 +3,7 @@ import os
 import time
 import unittest
 
-from harness import STUBS, AiTestCase, known_bug, q
+from harness import STUBS, AiTestCase, q
 
 SETTLE = "sleep 0.3"      # for the watcher of the work dir to see events
 
@@ -252,8 +252,6 @@ class LiveNotifications(AiTestCase):
         r = self.ai("-w", session=f'touch "$WORK/ordinary"; mkdir "$WORK/dir"; {SETTLE}')
         self.assertEqual(r.notifications, [])
 
-    @known_bug("markup: since bash 5.2, & in a ${var//x/y} replacement is the "
-               "matched text, so < becomes <lt; and the markup goes through")
     def test_the_body_is_not_read_as_markup(self):
         d = self.work / "<b>x&y"
         d.mkdir()
