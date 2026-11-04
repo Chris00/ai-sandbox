@@ -5,13 +5,17 @@ bwrap and what it leaves on disk.  They don't depend on its language, so
 they can check a rewrite against the same expectations.
 
 ```sh
-python3 -m unittest discover -s tests           # all but the real sandbox
-python3 -m unittest discover -s tests -k Promote    # some of them
-AI_TEST_SHOW_KNOWN_BUGS=1 python3 -m unittest discover -s tests
-AI_TEST_REAL=1 python3 -m unittest tests/test_real_sandbox.py     # on the host
+tests/run.py                        # all, in parallel, but the real sandbox
+tests/run.py Promote test_cli       # the classes with these in their name
+AI_TEST_SHOW_KNOWN_BUGS=1 tests/run.py test_names
+AI_TEST_REAL=1 tests/run.py RealSandbox   # on the host
+cd tests && python3 -m unittest test_names.Evasion -v     # one at a time
 ```
 
-Nothing to install but what `ai` needs, plus `pgrep`.  Each test has its
+`tests/run.py` takes about a minute with 24 CPUs, and ten or so on one:
+most of the time goes to `test_names.py`, which has about 950 cases.
+
+Nothing to install but what `ai` needs.  Each test has its
 own `$HOME` in a temporary directory; your real one isn't used, and the
 fake notify-send keeps your desktop quiet.
 
@@ -24,6 +28,10 @@ fake notify-send keeps your desktop quiet.
 | `test_names.py` | hostile names, everywhere names are handled or shown |
 | `test_real_sandbox.py` | what the agent really can do in a session (on the host) |
 | `test_harness.py` | the fake sandbox itself |
+
+`ai` runs on a terminal of its own, under `session_leader.py`, which
+stands for your shell: if `ai` led the session, the kernel would hang up
+whatever it leaves behind at its exit, and that would go unnoticed.
 
 ## The fake sandbox
 

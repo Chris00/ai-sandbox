@@ -284,7 +284,6 @@ class Concurrent(AiTestCase):
     def hold(self, cwd=None):
         running = self.start(*(["-w"] if cwd else []), cwd=cwd or self.work, session=self.HOLD)
         self.wait_for(running.logdir / "started", running)
-        self.addCleanup(lambda: running.result or running.kill())
         return running
 
     def release(self, running):
@@ -330,9 +329,9 @@ class Concurrent(AiTestCase):
 
     def test_locks_die_with_a_killed_session(self):
         s = self.hold(self.work)
+        # The session's process group: the locks' holders too.
         s.kill()
-        s.proc.wait()
-        # kill: the session's process group, so the locks' holders too.
+        s.close()
         self.assertOk(self.ai("-w"))
 
     def test_the_sandbox_does_not_inherit_the_locks(self):

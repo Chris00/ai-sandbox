@@ -1,9 +1,8 @@
 """What the sandbox is made of: the arguments given to bwrap."""
 import os
-import subprocess
 import unittest
 
-from harness import AiTestCase, for_each_name, expand_names, known_bug, q
+from harness import AiTestCase
 
 
 class Isolation(AiTestCase):
@@ -84,14 +83,16 @@ class Network(AiTestCase):
         self.assertIn("slirp4netns stopped", r.err)
         self.assertFalse((self.work / "ran").exists())
 
-    def test_slirp4netns_is_stopped_at_the_end(self):
-        r = self.ai("-w", session="sleep 0.2")
+    def test_no_process_is_left_behind(self):
+        (self.home / ".ssh").mkdir()
+        (self.home / ".ssh/id_ed25519_ai").write_text("key")
+        r = self.ai("-w", "--ssh", session="sleep 0.1")
         self.assertOk(r)
-        p = subprocess.run(["pgrep", "-f", f"^sleep 600$"], capture_output=True, text=True)
-        for pid in p.stdout.split():
-            with open(f"/proc/{pid}/environ", "rb") as f:
-                self.assertNotIn(str(r.log).encode(), f.read(),
-                                 "the fake slirp4netns is still running")
+        self.assertEqual(r.leftovers, [])
+
+    def test_no_process_is_left_behind_after_a_failure(self):
+        r = self.ai("-w", session="exit 3", env={"AI_TEST_NFT_FAIL": "1"})
+        self.assertEqual(r.leftovers, [])
 
 
 class Environment(AiTestCase):
@@ -199,10 +200,7 @@ class WorkDir(AiTestCase):
         self.assertIn(str(key), added)
         for host in ("github.com", "gitlab.com"):
             self.assertIn(host, added)
-        pid = r.logged("ssh-agent.pid")
-        self.assertFalse(os.path.exists(f"/proc/{pid}/cmdline")
-                         and b"sleep" in open(f"/proc/{pid}/cmdline", "rb").read(),
-                         "the agent is still running")
+        self.assertEqual(r.leftovers, [], "the agent is still running")
 
     def test_no_ssh_agent_by_default(self):
         r = self.ai("-w", env={"SSH_AUTH_SOCK": "/real/agent"})

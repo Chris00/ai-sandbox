@@ -5,14 +5,15 @@ stubs/: the tests only see what it prints, what it asks bwrap for and
 what it leaves on disk, so that they apply to any rewrite.  See
 README.md.
 """
-import fcntl
 import functools
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import termios
 import time
@@ -151,8 +152,10 @@ class Bwrap:
 
 
 class Result:
-    def __init__(self, rc, out, err, log):
+    def __init__(self, rc, out, err, log, leftovers=()):
         self.rc, self.out, self.err, self.log = rc, out, err, Path(log)
+        # The processes of this run that outlived ai.
+        self.leftovers = leftovers
         path = self.log / "bwrap.json"
         self.bwrap = Bwrap(json.loads(path.read_text())) if path.exists() else None
 
@@ -178,26 +181,62 @@ class Result:
 class Running:
     """A session of `ai` still running; see AiTestCase.start."""
 
-    def __init__(self, case, proc, master, out, err, log):
-        self.case, self.proc, self.master = case, proc, master
+    def __init__(self, case, leader, master, status, release, out, err, log):
+        self.case, self.proc, self.master = case, leader, master
+        self.status, self.release = status, release
         self.out, self.err, self.logdir = out, err, log
         self.result = None
+
+    def finished(self, timeout=0):
+        return bool(select.select([self.status], [], [], timeout)[0])
 
     def wait(self, timeout=TIMEOUT):
         if self.result is not None:
             return self.result
-        try:
-            self.proc.wait(timeout)
-        except subprocess.TimeoutExpired:
+        if not self.finished(timeout):
             self.kill()
-            self.proc.wait()
+            self.close()
             raise AssertionError(
                 f"ai still running after {timeout}s.\n"
                 f"--- stdout\n{self._read(self.out)}\n--- stderr\n{self._read(self.err)}")
-        os.close(self.master)
-        self.result = Result(self.proc.returncode, self._read(self.out),
-                             self._read(self.err), self.logdir)
+        rc = int(os.read(self.status, 32) or b"-9")
+        # While its leader lives, so that nothing hangs up what is left.
+        leftovers = self._leftovers()
+        self.close()
+        self.result = Result(rc, self._read(self.out), self._read(self.err),
+                             self.logdir, leftovers)
         return self.result
+
+    def close(self):
+        """End the session, with what may be left in it."""
+        for fd in (self.release, self.status):
+            os.close(fd)
+        self.proc.wait()
+        os.close(self.master)
+        self.master = None
+
+    def _leftovers(self, patience=1.0):
+        """What still runs with this run's log in its environment, once
+        what was just told to stop had the time to."""
+        mark = f"AI_TEST_LOG={self.logdir}".encode()
+        end = time.monotonic() + patience
+        while True:
+            found = []
+            for pid in filter(str.isdigit, os.listdir("/proc")):
+                try:
+                    with open(f"/proc/{pid}/environ", "rb") as f:
+                        if mark not in f.read().split(b"\0"):
+                            continue
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        cmdline = f.read().replace(b"\0", b" ").decode(errors="replace")
+                except OSError:
+                    continue
+                # Not a zombie, nor the leader.
+                if cmdline and int(pid) != self.proc.pid:
+                    found.append(cmdline)
+            if not found or time.monotonic() > end:
+                return found
+            time.sleep(0.02)
 
     def kill(self):
         try:
@@ -243,10 +282,9 @@ class AiTestCase(unittest.TestCase):
 
     def _stop_all(self):
         for r in self._running:
-            if r.result is None:
+            if r.master is not None:
                 r.kill()
-                r.proc.wait()
-                os.close(r.master)
+                r.close()
 
     # --- The configuration: the one place that knows its format. --------
 
@@ -307,20 +345,19 @@ class AiTestCase(unittest.TestCase):
             os.write(master, answer.encode() + b"\n")
         os.write(master, b"\x04")
 
-        def controlling_terminal():
-            os.setsid()
-            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-
+        status_r, status_w = os.pipe()
+        release_r, release_w = os.pipe()
         with open(out, "wb") as o, open(err, "wb") as e:
-            proc = subprocess.Popen(
-                [os.fsencode(str(AI)), *map(os.fsencode, map(str, args))],
+            leader = subprocess.Popen(
+                [sys.executable, "-I", str(TESTS / "session_leader.py"),
+                 str(status_w), str(release_r), str(AI), *map(str, args)],
                 cwd=os.fsencode(str(cwd if cwd is not None else self.work)),
-                env={k: v for k, v in environ.items()},
-                stdin=subprocess.DEVNULL, stdout=o, stderr=e,
-                preexec_fn=controlling_terminal,
+                env=environ, stdin=slave, stdout=o, stderr=e,
+                pass_fds=(status_w, release_r),
             )
-        os.close(slave)
-        running = Running(self, proc, master, out, err, log)
+        for fd in (slave, status_w, release_r):
+            os.close(fd)
+        running = Running(self, leader, master, status_r, release_w, out, err, log)
         self._running.append(running)
         return running
 
@@ -331,7 +368,7 @@ class AiTestCase(unittest.TestCase):
         """Wait for the file `path`, which a session creates."""
         end = time.monotonic() + timeout
         while not os.path.lexists(path):
-            if running is not None and running.proc.poll() is not None:
+            if running is not None and running.finished():
                 self.fail(f"ai ended before creating {path}: {running.wait()!r}")
             if time.monotonic() > end:
                 self.fail(f"{path} did not appear")
