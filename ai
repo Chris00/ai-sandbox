@@ -164,6 +164,18 @@ HOME_IGNORE=(
     .claude/todos .claude/shell-snapshots .claude/statsig
 )
 
+# Directories of the agent's home that the report at exit shows as one
+# entry, with the number of files changed in them, rather than file by
+# file: what an installation puts there belongs together.  Patterns as
+# above; a path in several of them is shown with the shortest.
+HOME_GROUPS=(
+    .claude/skills/*                    # Claude Code: a skill
+    .claude/plugins/cache/*/*           # a plugin (cache/MARKETPLACE/PLUGIN)
+    .claude/plugins/marketplaces/*      # a marketplace
+    .claude/projects/*/memory           # a project's memory
+    .local/share/claude/versions        # Claude Code's versions
+)
+
 # List of destination constraints of the form ‘[user@]dest-hostname’
 # for the $AI_SSH_KEY.  An empty list means that it is unrestricted
 # (it can be used anywhere it's accepted).
@@ -739,22 +751,57 @@ home_match() {
     return 1
 }
 
+# home_group PATH: the directory of $HOME_GROUPS that PATH, relative to
+# the agent's home, is in, followed by "/"; false if none.
+home_group() {
+    local prefix= part pat
+    local -a parts
+    IFS=/ read -r -a parts <<<"$1"
+    # The directories leading to PATH, shortest first.
+    for part in "${parts[@]:0:${#parts[@]}-1}"; do
+	prefix=${prefix:+$prefix/}$part
+	for pat in "${HOME_GROUPS[@]}"; do
+	    # shellcheck disable=SC2053     # $pat is a glob
+	    if [[ $prefix == $pat ]]; then
+		printf '%s/' "$prefix"
+		return 0
+	    fi
+	done
+    done
+    return 1
+}
+
 # home_changes: at exit, list the changes the session made to the
 # agent's home (since the snapshot $tmp/home.before), if any of them
-# touches the $HOME_TRIGGERS.  Of the other changes, only their number
-# is given, those of $HOME_IGNORE left out.
+# touches the $HOME_TRIGGERS, those in a directory of $HOME_GROUPS as
+# one entry, unless it is the only one there.  Of the other changes, only their number is given, those
+# of $HOME_IGNORE left out.
 home_changes() {
-    local type ctime path n=0
+    local type ctime path key i n=0
     local -a found=()
+    local -A count=() first=()
     while IFS=$'\t' read -r -d '' type ctime path; do
 	if home_match "$path" "${HOME_TRIGGERS[@]}"; then
 	    [ "$type" = d ] && path="$path (deleted)"
-	    found+=("$path")
+	    key=$(home_group "$path") || key=$path
+	    if [ -z "${count[$key]+x}" ]; then
+		found+=("$key")
+		first[$key]=$path
+	    fi
+	    count[$key]=$(( ${count[$key]:-0} + 1 ))
 	elif ! home_match "$path" "${HOME_IGNORE[@]}"; then
 	    n=$((n + 1))
 	fi
     done < <(LC_ALL=C comm -z -13 "$tmp/home.before" <(home_snapshot "${home_watch[@]}"))
     [ ${#found[@]} -gt 0 ] || return 0
+    for i in "${!found[@]}"; do
+	key=${found[i]}
+	if [ "${count[$key]}" -eq 1 ]; then
+	    found[i]=${first[$key]}
+	else
+	    found[i]="$key (${count[$key]} files)"
+	fi
+    done
     if [ -n "$work_path" ]; then
 	echo "Changed in the agent's home, in this project only (in $(rel_to_home "$project/home")):"
     else

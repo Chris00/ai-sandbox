@@ -383,6 +383,7 @@ Changed in the agent's home, in this project only (in ~/AI/projects/home-you-sof
   .bashrc
   .claude/settings.json (deleted)
   .claude/projects/-work-software-proj/memory/MEMORY.md
+  .claude/skills/review/ (3 files)
   and 12 more (ai --status lists the project's changes).
 Once reviewed, ai --promote PATH in the project makes one the base version.
 ```
@@ -400,6 +401,12 @@ can be extended in your configuration too; `ai --status` only counts
 them. Claude Code's `~/.claude.json` is among them, although it holds
 its MCP servers: Claude Code rewrites it at every start, so it would
 always be reported. A file in both lists is reported.
+
+Some directories are reported as one entry, with the number of files
+changed in them (unless there is only one), since what an installation puts there belongs
+together: a skill (`~/.claude/skills/review/`), a plugin, a
+marketplace, a project's memory, Claude Code's versions. That list,
+`HOME_GROUPS`, can be changed in your configuration as well.
 
 ### Promoting a change
 
@@ -425,6 +432,17 @@ since the base home must not change under one. `ai` refuses a symlink
 of the base home that would lead the copy out of it, and a directory
 that the project deleted and created again, which replaces the base's
 as a whole: copy what you need from it by hand.
+
+*Remark.* A skill is a directory: Claude Code finds the skills in
+`~/.claude/skills/` at startup, so promoting the directory is
+enough. A plugin isn't: Claude Code keeps its files in
+`~/.claude/plugins/cache/`, records the install in
+`~/.claude/plugins/installed_plugins.json` (and its marketplace in
+`known_marketplaces.json` and `marketplaces/`), and enables it in
+`~/.claude/settings.json`. Promoting all of these would also bring the
+project's other changes to the two JSON files, which hold every
+plugin.  Rather install plugins in a session without `-w`, for all
+projects.
 
 
 ## Notifications from the agent
@@ -708,6 +726,7 @@ HOME_IGNORE+=(.local/state/myagent)
 READONLY+=(.myrc)                    # see Tool files
 PRIVATE+=(_build)
 PRIVATE_IF[_build]=dune-project
+HOME_GROUPS+=(".config/myagent/*")
 AI_SSH_HOSTS=(github.com)            # replaces the default list
 FORBID_WORK+=("$HOME/Documents/taxes")
 ```
