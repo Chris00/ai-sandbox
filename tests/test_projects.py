@@ -388,6 +388,21 @@ class Forget(ProjectCase):
         self.assertNotIn("ai", self.git("remote").split())
         self.assertEqual(os.listdir(self.work / "target"), [])
 
+    def test_no_hook_of_your_repo_runs(self):
+        # The agent could have changed what is in a repo it created.  Removing
+        # the remote changes refs, which is what a hook can watch.
+        self.make_repo()
+        self.assertOk(self.ai("-w", answers=["y"]))
+        self.agent_commit()
+        self.git("fetch", "-q", "ai")
+        marker = self.outside / "ran"
+        hook = self.work / ".git/hooks/reference-transaction"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        hook.chmod(0o755)
+        self.assertOk(self.ai("--forget", answers=["y"]))
+        self.assertNotIn("ai", self.git("remote").split())
+        self.assertFalse(marker.exists(), "--forget ran a hook of your repo")
+
     def test_a_refusal_changes_nothing(self):
         self.make_repo()
         self.assertOk(self.ai("-w", answers=["y"]))
