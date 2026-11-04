@@ -805,7 +805,12 @@ untrusted code harmless.
   [Configuration](#configuration)).
 - **Code you run later.** The agent's changes land in your working
   tree. Review them before running the code, its build files or its CI
-  configuration on the host.
+  configuration on the host.  In particular, `ai` assumes agents only
+  run in the sandbox: the files that configure or instruct them in a
+  project (`.claude/`, `CLAUDE.md`, `AGENTS.md`,
+  `.github/copilot-instructions.md`…) aren't checked, so an agent run
+  on that project outside the sandbox, *including an assistant in your
+  editor*, would follow what the sandboxed agent wrote there.
 - **The agent's own directories.** `~/AI/home` and `~/AI/projects` are
   controlled by the agent, and the exit check doesn't scan them. On the
   host, treat them like the work tree (see [Files](#files)).
