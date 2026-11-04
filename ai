@@ -1621,7 +1621,14 @@ forget() {
 	case $url in
 	    "$project/git"|"$project/git"/*)
 		check_plain_config "$g"
-		git -C "${g%/.git}" remote remove ai &&
+		# Not "git remote remove": it runs the repo's
+		# reference-transaction hook, core.hooksPath or not (git
+		# 2.43).  The config written directly, the refs deleted by
+		# update-ref, which honours core.hooksPath.
+		/usr/bin/git config --file "$g/config" --remove-section remote.ai &&
+		    git -C "${g%/.git}" for-each-ref --format='delete %(refname)' \
+			refs/remotes/ai/ |
+			git -C "${g%/.git}" update-ref --stdin &&
 		    echo "Repo $(rel_to_pwd "${g%/.git}"): ai remote removed."
 		;;
 	esac
