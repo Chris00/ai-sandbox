@@ -15,6 +15,9 @@ cd tests && python3 -m unittest test_names.Evasion -v     # one at a time
 `tests/run.py` takes about a minute with 24 CPUs, and ten or so on one:
 most of the time goes to `test_names.py`, which has about 950 cases.
 
+GitHub runs them all but the real sandbox, which needs a more recent
+bubblewrap than its Ubuntu has (`.github/workflows/tests.yml`).
+
 Nothing to install but what `ai` needs.  Each test has its
 own `$HOME` in a temporary directory; your real one isn't used, and the
 fake notify-send keeps your desktop quiet.

@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    # Not the real sandbox (test_real_sandbox.py): it needs bubblewrap 0.10
+    # or later, which this Ubuntu doesn't have.  Run it on the host.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install what ai needs and the runner lacks
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends inotify-tools python3-seccomp
+
+      - name: Run the tests
+        run: tests/run.py
