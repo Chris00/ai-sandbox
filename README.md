@@ -297,9 +297,11 @@ Repo .:
   ai/main: new commits, not fetched yet (git fetch ai)
 Repo vendor/lib: nothing left to merge
 Home layer: 2.4M, changes to the agent's home:
-  .bashrc
-  .claude/projects/ (1 file)
+  .claude/.credentials.json
+! .claude/skills/review/ (3 files)
+! .bashrc
   and 37 more in HOME_IGNORE (histories, caches...).
+!: can run code, or steer the agent, in its later sessions.
 Private copies:
   .venv: 85M
   target: 1.2G
@@ -307,9 +309,8 @@ Private copies:
 
 For each repository, it lists the agent's branches with commits not in
 your branches (see [Working with Git](#working-with-git)). It then
-lists the project's changes to the agent's home (see
-[The agent's home](#the-agents-home)), two levels down, only counting
-those in `HOME_IGNORE`, and each
+lists the project's changes to the agent's home, summed up as in the
+report at exit (see [The agent's home](#the-agents-home)), and each
 private build directory (see [Tool files](#tool-files)) with its size,
 noting those the project no longer uses.  It reads the clones from
 your repositories, like `git fetch ai`, and runs nothing in them.
@@ -369,44 +370,56 @@ avoids this, since nothing is written back: for Claude Code, generate
 one with `claude setup-token` and give it to every session in
 `AI_ENV`.
 
-At exit, `ai` reports the files of the agent's home changed during the
-session that make code run, or steer the agent, in its later sessions:
-shell profiles, `~/.local/bin`, Git's and SSH's configuration, package
-managers' settings, Claude Code's settings (hooks, permissions), its
-instructions (`CLAUDE.md`, the projects' memory) and its program. The
-list, `HOME_TRIGGERS`, can be extended in your
-[configuration](#configuration). For example:
+At exit, `ai` sums up the changes the session made to the agent's
+home, and marks with `!` those that make code run, or steer the agent,
+in its later sessions: shell profiles, `~/.local/bin`, Git's and SSH's
+configuration, package managers' settings, Claude Code's settings
+(hooks, permissions), its instructions (`CLAUDE.md`, the projects'
+memory) and its program. That list, `HOME_TRIGGERS`, can be extended
+in your [configuration](#configuration). For example:
 
 ```
 2026-11-01 14:31:30 Session in /home/you/software/proj:
 Changed in the agent's home, in this project only (in ~/AI/projects/home-you-software-proj/home):
-  .bashrc
-  .claude/settings.json (deleted)
-  .claude/projects/-work-software-proj/memory/MEMORY.md
-  .claude/skills/review/ (3 files)
-  and 12 more (ai --status lists the project's changes).
+  .claude/.credentials.json
+! .claude/settings.json (deleted)
+! .claude/skills/review/ (3 files)
+! .claude/projects/-work-software-proj/memory/MEMORY.md
+! .bashrc
+  .config/gh/ (2 files)
+  and 12 more in HOME_IGNORE (histories, caches...).
+!: can run code, or steer the agent, in its later sessions.
 Once reviewed, ai --promote PATH in the project makes one the base version.
 ```
 
+The summary is shown on the terminal. Only the entries marked `!` go
+to `~/AI/warnings.log`, as warnings. `ai --status` gives the same
+summary of all the project's changes to the agent's home.
+
 In a project, the change is in its `home/`: review it there, and
 delete the file to go back to the base version, or promote it (see
-below). After a session without
-`-w`, the report covers these files in the base home, which every
-project sees.
+below). After a session without `-w`, the report covers only the
+files marked `!`, in the base home, which every project sees.
 
-The other changes are counted, except those to files that change in
-about every session: shell and other histories, `~/.cache`, Claude
-Code's state, transcripts and to-do lists… Their list, `HOME_IGNORE`,
-can be extended in your configuration too; `ai --status` only counts
-them. Claude Code's `~/.claude.json` is among them, although it holds
-its MCP servers: Claude Code rewrites it at every start, so it would
-always be reported. A file in both lists is reported.
+The summary first shows what matches `HOME_GROUPS`, in its order, then
+the rest, two levels down (`.config/gh/`). A directory is shown as one
+entry, with the number of files changed in it, unless there is only
+one. By default, the list puts first your login (`.credentials.json`,
+which you may want to promote) and Claude Code's settings, then shows
+each skill, plugin, marketplace or project's memory as one entry,
+since what an installation puts there belongs together. A file goes
+with the first pattern that matches it or one of its directories, so
+`.claude/skills/synced/*`, listed before `.claude/skills/*`, shows the
+skills synced from claude.ai one by one. `HOME_GROUPS` can be changed
+in your configuration as well.
 
-Some directories are reported as one entry, with the number of files
-changed in them (unless there is only one), since what an installation puts there belongs
-together: a skill (`~/.claude/skills/review/`), a plugin, a
-marketplace, a project's memory, Claude Code's versions. That list,
-`HOME_GROUPS`, can be changed in your configuration as well.
+Files that change in about every session are only counted: shell and
+other histories, `~/.cache`, npm's cache, Claude Code's state,
+transcripts, backups and to-do lists… Their list, `HOME_IGNORE`, can be
+extended in your configuration too. Claude Code's `~/.claude.json` is
+among them, although it holds its MCP servers: Claude Code rewrites it
+at every start, so it would always show. A file in both lists is
+marked `!`.
 
 ### Promoting a change
 

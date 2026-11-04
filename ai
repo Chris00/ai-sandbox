@@ -133,8 +133,10 @@ declare -A PRIVATE_IF=(
 )
 # Files of the agent's home that make code run, or steer the agent, in
 # its later sessions: changes to them during a session are reported at
-# exit.  Paths relative to the home; "*" matches any characters,
-# including "/", and a directory covers what it contains.
+# exit.
+#
+# Patterns: Paths are relative to the home; "*" matches any
+# characters, including "/", and a directory covers what it contains.
 HOME_TRIGGERS=(
     .profile .bashrc .bash_profile .bash_login .bash_logout .inputrc
     .zshenv .zprofile .zshrc .zlogin .config/fish
@@ -162,14 +164,22 @@ HOME_IGNORE=(
     # though it also holds the MCP servers), transcripts, to-do lists...
     .claude.json .claude.json.backup .claude/projects/*.jsonl
     .claude/todos .claude/shell-snapshots .claude/statsig
+    .claude/backups .claude/cache .claude/history.jsonl
+    .npm                                # npm's cache
 )
 
-# Directories of the agent's home that the report at exit shows as one
-# entry, with the number of files changed in them, rather than file by
-# file: what an installation puts there belongs together.  Patterns as
-# above; a path in several of them is shown with the shortest.
+# How the summaries of the changes to the agent's home (at exit, and
+# in ai --status) show them: first what matches these patterns, in this
+# order, a directory as one entry with the number of files changed in
+# it (what an installation puts there belongs together), then the rest,
+# two levels down.  A file goes with the first pattern that matches it
+# or one of its directories, the shortest.  Patterns as above; one
+# naming a file only puts it first.
 HOME_GROUPS=(
-    .claude/skills/*                    # Claude Code: a skill
+    .claude/.credentials.json           # Claude Code: your login, to promote?
+    .claude/settings.json
+    .claude/skills/synced/*             # a skill from claude.ai, before...
+    .claude/skills/*                    # ...any other skill
     .claude/plugins/cache/*/*           # a plugin (cache/MARKETPLACE/PLUGIN)
     .claude/plugins/marketplaces/*      # a marketplace
     .claude/projects/*/memory           # a project's memory
@@ -751,19 +761,27 @@ home_match() {
     return 1
 }
 
-# home_group PATH: the directory of $HOME_GROUPS that PATH, relative to
-# the agent's home, is in, followed by "/"; false if none.
+# home_group PATH: set $group_key and $group_rank for PATH, relative to
+# the agent's home, from the first pattern of $HOME_GROUPS (its index is
+# the rank) that matches PATH or one of its directories, the shortest:
+# the key is that directory followed by "/", or PATH itself.  False if
+# none matches.  (Variables, not output: it runs once per file.)
 home_group() {
-    local prefix= part pat
+    local prefix part i
     local -a parts
     IFS=/ read -r -a parts <<<"$1"
-    # The directories leading to PATH, shortest first.
-    for part in "${parts[@]:0:${#parts[@]}-1}"; do
-	prefix=${prefix:+$prefix/}$part
-	for pat in "${HOME_GROUPS[@]}"; do
-	    # shellcheck disable=SC2053     # $pat is a glob
-	    if [[ $prefix == $pat ]]; then
-		printf '%s/' "$prefix"
+    for i in "${!HOME_GROUPS[@]}"; do
+	prefix=
+	for part in "${parts[@]}"; do
+	    prefix=${prefix:+$prefix/}$part
+	    # shellcheck disable=SC2053     # the pattern is a glob
+	    if [[ $prefix == ${HOME_GROUPS[i]} ]]; then
+		group_rank=$i
+		if [ "$prefix" = "$1" ]; then
+		    group_key=$1
+		else
+		    group_key=$prefix/
+		fi
 		return 0
 	    fi
 	done
@@ -771,46 +789,72 @@ home_group() {
     return 1
 }
 
-# home_changes: at exit, list the changes the session made to the
-# agent's home (since the snapshot $tmp/home.before), if any of them
-# touches the $HOME_TRIGGERS, those in a directory of $HOME_GROUPS as
-# one entry, unless it is the only one there.  Of the other changes, only their number is given, those
-# of $HOME_IGNORE left out.
-home_changes() {
-    local type ctime path key i n=0
-    local -a found=()
-    local -A count=() first=()
-    while IFS=$'\t' read -r -d '' type ctime path; do
+# summarize_home [triggers]: sum up the files of the agent's home read
+# on stdin, NUL-separated "TYPE PATH" (TYPE "d" for a deletion, "f"
+# otherwise), PATH relative to the home: one line per entry, those of
+# $HOME_GROUPS first, then the others two levels down (.claude/plugins/),
+# a directory with a single file shown as that file.  "!" marks the
+# entries with $HOME_TRIGGERS; with "triggers", only those are shown.
+# Of the files of $HOME_IGNORE that aren't triggers, only the number is
+# given.  Prints nothing if there is nothing to show.
+summarize_home() {
+    local only=$1 entry path key trig n m ignored=0 LC_ALL=C
+    local -A count=() first=() rank=() mark=()
+    local -a parts
+    while IFS= read -r -d '' entry; do
+	path=${entry#? }
+	path=${path//[[:cntrl:]]/?}     # from the agent: made safe
 	if home_match "$path" "${HOME_TRIGGERS[@]}"; then
-	    [ "$type" = d ] && path="$path (deleted)"
-	    key=$(home_group "$path") || key=$path
-	    if [ -z "${count[$key]+x}" ]; then
-		found+=("$key")
-		first[$key]=$path
-	    fi
-	    count[$key]=$(( ${count[$key]:-0} + 1 ))
-	elif ! home_match "$path" "${HOME_IGNORE[@]}"; then
-	    n=$((n + 1))
-	fi
-    done < <(LC_ALL=C comm -z -13 "$tmp/home.before" <(home_snapshot "${home_watch[@]}"))
-    [ ${#found[@]} -gt 0 ] || return 0
-    for i in "${!found[@]}"; do
-	key=${found[i]}
-	if [ "${count[$key]}" -eq 1 ]; then
-	    found[i]=${first[$key]}
+	    trig=1
+	elif home_match "$path" "${HOME_IGNORE[@]}"; then
+	    ignored=$((ignored + 1))
+	    continue
 	else
-	    found[i]="$key (${count[$key]} files)"
+	    trig=
 	fi
+	if home_group "$path"; then
+	    key=$group_key
+	else
+	    IFS=/ read -r -a parts <<<"$path"
+	    if [ ${#parts[@]} -gt 2 ]; then
+		key="${parts[0]}/${parts[1]}/"
+	    else
+		key=$path
+	    fi
+	    group_rank=${#HOME_GROUPS[@]}
+	fi
+	if [ -z "${count[$key]+x}" ]; then
+	    rank[$key]=$group_rank
+	    first[$key]=$path
+	    [ "${entry%% *}" = d ] && first[$key]="$path (deleted)"
+	fi
+	count[$key]=$(( ${count[$key]:-0} + 1 ))
+	[ -z "$trig" ] || mark[$key]=1
     done
-    if [ -n "$work_path" ]; then
-	echo "Changed in the agent's home, in this project only (in $(rel_to_home "$project/home")):"
-    else
-	echo "Changed in the agent's base home, seen by every project (in $(rel_to_home "$AIHOME")):"
+    n=0
+    while IFS=$'\t' read -r -d '' _ key; do
+	[ -n "${mark[$key]}" ] || [ "$only" != triggers ] || continue
+	n=$((n + 1))
+	m='  '
+	[ -z "${mark[$key]}" ] || m='! '
+	if [ "${count[$key]}" -eq 1 ]; then
+	    printf '%s%s\n' "$m" "${first[$key]}"
+	else
+	    printf '%s%s (%d files)\n' "$m" "$key" "${count[$key]}"
+	fi
+    done < <(for key in "${!count[@]}"; do
+		 printf '%s\t%s\0' "${rank[$key]}" "$key"
+	     done | sort -z -t $'\t' -k1,1n -k2)
+    if [ "$n" -gt 0 ] && [ "$only" != triggers ] && [ "$ignored" -gt 0 ]; then
+	echo "  and $ignored more in HOME_IGNORE (histories, caches...)."
     fi
-    printf '%s\n' "${found[@]}" | indent
-    [ "$n" -eq 0 ] || echo "  and $n more (ai --status lists the project's changes)."
-    [ -z "$work_path" ] ||
-	echo "Once reviewed, ai --promote PATH in the project makes one the base version."
+}
+
+# home_changes: the changes the session made to the agent's home
+# (since the snapshot $tmp/home.before), for summarize_home.
+home_changes() {
+    LC_ALL=C comm -z -13 "$tmp/home.before" <(home_snapshot "${home_watch[@]}") |
+	LC_ALL=C sed -z 's/^\(.\)\t[^\t]*\t/\1 /'
 }
 
 # Entries printed now by "$@" that are not in the snapshot file $1,
@@ -1248,51 +1292,19 @@ find_project() {
     printf '%s' "$d"
 }
 
-# show_home_layer LAYER: the changes in LAYER, a project's layer of the
-# agent's home, summed up two levels down (.claude/projects/...), if
-# any, but those of $HOME_IGNORE, only counted.  Overlayfs records
-# deletions as whiteouts: character devices.
+# show_home_layer LAYER: sum up the changes in LAYER, a project's layer
+# of the agent's home, if any.  Overlayfs records deletions as whiteouts:
+# character devices.
 show_home_layer() {
-    local layer=$1 entry ignored=0
-    local -a entries shown=()
+    local layer=$1 summary
     # 2>/dev/null: the agent may leave unreadable directories.
-    mapfile -d '' -t entries < <(
-	find "$layer" -mindepth 1 \( -type c -printf 'd %P\0' -o \
-	     ! -type d -printf 'f %P\0' \) 2>/dev/null
-    )
-    [ ${#entries[@]} -gt 0 ] || return 0
-    for entry in "${entries[@]}"; do
-	if home_match "${entry#? }" "${HOME_IGNORE[@]}" &&
-	       ! home_match "${entry#? }" "${HOME_TRIGGERS[@]}"; then
-	    ignored=$((ignored + 1))
-	else
-	    shown+=("$entry")
-	fi
-    done
+    summary=$(find "$layer" -mindepth 1 \( -type c -printf 'd %P\0' -o \
+		   ! -type d -printf 'f %P\0' \) 2>/dev/null | summarize_home)
+    [ -n "$summary" ] || return 0
     echo "Home layer: $(du -sh -- "$layer" 2>/dev/null | cut -f1), changes to the agent's home:"
-    if [ ${#shown[@]} -gt 0 ]; then
-	printf '%s\0' "${shown[@]}" |
-	    LC_ALL=C sort -z -k2 |
-	    LC_ALL=C sed -z 's/[[:cntrl:]]/?/g' |
-	    awk 'BEGIN { RS = "\0" }
-	         { path = substr($0, 3)
-	           if (split(path, c, "/") <= 2) {
-	               key = path; deleted[key] = (substr($0, 1, 1) == "d")
-	           } else {
-	               key = c[1] "/" c[2] "/"; files[key]++
-	           }
-	           if (!(key in seen)) { seen[key] = 1; order[++k] = key } }
-	         END { for (i = 1; i <= k; i++) {
-	                   key = order[i]
-	                   if (key in files)
-	                       printf "  %s (%d file%s)\n", key, files[key],
-	                              (files[key] > 1 ? "s" : "")
-	                   else
-	                       printf "  %s%s\n", key, deleted[key] ? ": deleted" : ""
-	               } }'
-    fi
-    [ "$ignored" -eq 0 ] ||
-	echo "  and $ignored more in HOME_IGNORE (histories, caches...)."
+    printf '%s\n' "$summary"
+    ! grep -q '^! ' <<<"$summary" ||
+	echo "!: can run code, or steer the agent, in its later sessions."
 }
 
 # show_status [DIR]: what ai keeps for the project containing the current
@@ -1716,7 +1728,7 @@ watch_reader=     # the function reporting what it sees
 agent_events_pid= # watch_agent_events, reading the agent's events
 
 cleanup() {
-    local links triggers home p
+    local links triggers home_all home_warn p
     if [ -n "$slirp" ]; then
 	kill "$slirp" 2>/dev/null
 	wait "$slirp" 2>/dev/null       # it stops slirp4netns and reaps it
@@ -1745,25 +1757,49 @@ cleanup() {
 		       cut -f1 |
 		       grep -vxF -f <(tr '\0' '\n' <"$tmp/protected" 2>/dev/null))
     fi
-    [ -f "$tmp/home.before" ] && home=$(home_changes)
-    if [ -n "$links$triggers$home" ]; then
-	{
-	    echo "$(date '+%F %T') Session in ${work_path:-$AIHOME}:"
-	    if [ -n "$links" ]; then
-		echo "New symlinks out of the work dir (don't follow them blindly):"
-		indent <<<"$links"
-	    fi
-	    if [ -n "$triggers" ]; then
-		echo "New or changed files that can run code on the host (review before"
-		echo "entering these directories, opening them in an editor or running"
-		echo "Git, npm, Cargo... there):"
-		indent <<<"$triggers"
-	    fi
-	    [ -z "$home" ] || printf '%s\n' "$home"
-	} | tee -a "$AI_LOG" >&2
+    # The changes to the agent's home: all of them on the terminal, only
+    # those that can run code or steer the agent in the log.
+    if [ -f "$tmp/home.before" ]; then
+	home_changes >"$tmp/home.changes"
+	home_all=$(summarize_home <"$tmp/home.changes")
+	home_warn=$(summarize_home triggers <"$tmp/home.changes")
+    fi
+    if [ -n "$links$triggers$home_warn" ]; then
+	session_report "$home_warn" >>"$AI_LOG"
+    fi
+    if [ -n "$links$triggers$home_all" ]; then
+	session_report "$home_all" >&2
     fi
     rm -rf -- "$tmp"
 }
+# session_report HOME: the report at exit on the session: the $links
+# and $triggers of cleanup, and HOME, a summary of the changes to the
+# agent's home.
+session_report() {
+    echo "$(date '+%F %T') Session in ${work_path:-$AIHOME}:"
+    if [ -n "$links" ]; then
+	echo "New symlinks out of the work dir (don't follow them blindly):"
+	indent <<<"$links"
+    fi
+    if [ -n "$triggers" ]; then
+	echo "New or changed files that can run code on the host (review before"
+	echo "entering these directories, opening them in an editor or running"
+	echo "Git, npm, Cargo... there):"
+	indent <<<"$triggers"
+    fi
+    [ -n "$1" ] || return 0
+    if [ -n "$work_path" ]; then
+	echo "Changed in the agent's home, in this project only (in $(rel_to_home "$project/home")):"
+    else
+	echo "Changed in the agent's base home, seen by every project (in $(rel_to_home "$AIHOME")):"
+    fi
+    printf '%s\n' "$1"
+    ! grep -q '^! ' <<<"$1" ||
+	echo "!: can run code, or steer the agent, in its later sessions."
+    [ -z "$work_path" ] ||
+	echo "Once reviewed, ai --promote PATH in the project makes one the base version."
+}
+
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
