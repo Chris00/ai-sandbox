@@ -699,6 +699,9 @@ start_watch() {
     exclude=$(printf '%s\n' .git "${PRIVATE[@]}" |
 		  sed 's/\./\\./g' | paste -sd '|')
     mkfifo "$tmp/watch" || return
+    # Created now: inotifywait, started in the background, could open it
+    # after the loop below first reads it.
+    : >"$tmp/watch.log"
     inotifywait -m -r -e create -e moved_to \
 		--exclude "/($exclude)/" --format $'%e\t%w%f%0' --no-newline \
 		"$dir" >"$tmp/watch" 2>"$tmp/watch.log" 7>&- 9>&- &
