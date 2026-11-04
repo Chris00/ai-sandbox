@@ -16,16 +16,8 @@ MOUNT = "/work/software/proj"
 # The causes of the known bugs below.
 C1 = ("safe and safe_text work on bytes, with LC_ALL=C: the UTF-8 form of the C1 "
       "controls (U+009B is CSI, like ESC [) reaches the terminal")
-GREP_BINARY = ("cleanup filters the triggers with grep, which takes a path that isn't "
-               "UTF-8 for binary data and drops it from the report and the log")
-CUT = ("cleanup passes the triggers through cut -f1, so a tab in a directory's name "
-       "cuts the path there")
-SPLIT = ("cleanup passes the triggers through tr '\\0' '\\n', so a newline in a name "
-         "splits the path into several lines")
 RAW_NEWLINE = "the path is shown as it is: safe_text keeps newlines, so a name can make lines"
 STRIPPED = "$(...) removes trailing newlines: this is another path, or another name"
-EVENTS = ("watch_triggers reads inotifywait's events one per line, so a newline in a "
-          "directory's name hides what appears in it")
 
 
 def c1(**others):
@@ -46,7 +38,7 @@ class ExitReport(AiTestCase):
         self.assertShown(r.err, f"./link → /x/{name}")
         self.assertSafe(r.err)
 
-    @for_each_name(c1(invalid_utf8=GREP_BINARY, tab=CUT, newline=SPLIT, trailing_newline=SPLIT))
+    @for_each_name(c1())
     def test_new_tool_file_in_a_directory(self, name):
         d = self.work / name
         d.mkdir()
@@ -54,7 +46,7 @@ class ExitReport(AiTestCase):
         self.assertShown(r.err, f"{self.work}/{name}/.envrc")
         self.assertSafe(r.err)
 
-    @for_each_name(c1(invalid_utf8=GREP_BINARY, tab=CUT, newline=SPLIT, trailing_newline=SPLIT))
+    @for_each_name(c1())
     def test_new_tool_file_in_a_new_directory(self, name):
         r = self.ai("-w", session=f'mkdir "$WORK"/{q(name)}; touch "$WORK"/{q(name)}/.npmrc')
         self.assertShown(r.err, f"{self.work}/{name}/.npmrc")
@@ -72,7 +64,7 @@ class ExitReport(AiTestCase):
         r = self.ai("-w", session=f'git init -q "$WORK/new"; mkdir "$WORK"/{q(name)}; touch "$WORK"/{q(name)}/.npmrc')
         self.assertIn(f"{self.work}/new/.git\n", r.err)
 
-    @for_each_name(c1(newline=SPLIT, trailing_newline=SPLIT))
+    @for_each_name(c1())
     def test_the_log(self, name):
         (self.work / name).mkdir()
         self.ai("-w", session=f'touch "$WORK"/{q(name)}/.envrc')
@@ -294,7 +286,8 @@ class ProjectDirectory(AiTestCase):
         r = self.ai("-w", cwd=d, session=f'echo stop >"$NOTIFY"; {SETTLE}')
         self.assertEqual(len(r.notifications), 1)
         title = r.notifications[0][-2]
-        self.assertShown(title, name)
+        # notify-send refuses what isn't UTF-8: those bytes are left out.
+        self.assertShown(title, os.fsencode(name).decode("utf-8", "ignore"))
         self.assertSafe(title)
 
 
@@ -389,7 +382,7 @@ class Promote(AiTestCase):
 
 @expand_names
 class LiveNotifications(AiTestCase):
-    @for_each_name(c1(newline=EVENTS, trailing_newline=EVENTS))
+    @for_each_name(c1())
     def test_tool_file_in_a_directory(self, name):
         (self.work / name).mkdir()
         r = self.ai("-w", session=f'touch "$WORK"/{q(name)}/.envrc; {SETTLE}')
@@ -398,13 +391,13 @@ class LiveNotifications(AiTestCase):
         self.assertIn(".envrc was just created", body)
         self.assertSafe(body)
 
-    @for_each_name(c1(newline=EVENTS, trailing_newline=EVENTS))
+    @for_each_name(c1())
     def test_tool_file_in_a_new_directory(self, name):
         r = self.ai("-w", session=f'mkdir "$WORK"/{q(name)}; touch "$WORK"/{q(name)}/.envrc; {SETTLE}')
         self.assertEqual(len(r.notifications), 1, r.notifications)
         self.assertSafe(r.notifications[0][-1])
 
-    @for_each_name(c1(newline=EVENTS, trailing_newline=EVENTS))
+    @for_each_name(c1())
     def test_the_log_stays_one_line_per_entry(self, name):
         (self.work / name).mkdir()
         self.ai("-w", session=f'touch "$WORK"/{q(name)}/.envrc; {SETTLE}')
@@ -419,7 +412,7 @@ class Evasion(AiTestCase):
 
     def test_a_name_sorted_first_cannot_hide_the_tool_files(self):
         # "!" sorts before about any name, and an invalid byte makes the path
-        # binary for grep: only that path may be lost (see GREP_BINARY).
+        # binary for grep, were it used on them.
         bad = q(b"!\xff")
         r = self.ai("-w", session=f'mkdir "$WORK"/{bad}; touch "$WORK"/{bad}/.npmrc; '
                                   'touch "$WORK/.envrc"; git init -q "$WORK/new"')
@@ -428,27 +421,36 @@ class Evasion(AiTestCase):
             self.assertIn(f"{self.work}/.envrc", text)
             self.assertIn(f"{self.work}/new/.git", text)
 
-    @known_bug(f"{EVENTS}; {SPLIT}; {GREP_BINARY}")
     def test_a_name_cannot_leave_a_tool_file_unreported(self):
-        # The newline defeats the watcher and splits the path in two lines,
-        # and neither survives grep.  At least one report must mention it.
+        # A newline and invalid bytes: each report must mention it.
         bad = q(b"\xff\n\xff")
         r = self.ai("-w", session=f'mkdir "$WORK"/{bad}; touch "$WORK"/{bad}/.envrc; {SETTLE}')
         self.assertTrue((self.work / os.fsdecode(b"\xff\n\xff") / ".envrc").exists())
         log = self.warnings.read_bytes().decode("utf-8", "replace") if self.warnings.exists() else ""
-        reported = r.err.replace("binary file matches", "") + log + repr(r.notifications)
-        self.assertIn(".envrc", reported)
+        self.assertIn(".envrc", r.err)
+        self.assertIn(".envrc", log)
+        self.assertEqual(len(r.notifications), 1, r.notifications)
+        self.assertNotIn("binary file matches", r.err)
 
-    @known_bug(f"{SPLIT}; {GREP_BINARY}")
     def test_a_name_cannot_leave_a_new_repo_unreported(self):
         bad = q(b"\xff\n\xff")
         r = self.ai("-w", session=f'mkdir "$WORK"/{bad}; git init -q "$WORK"/{bad}; {SETTLE}')
         self.assertTrue((self.work / os.fsdecode(b"\xff\n\xff") / ".git").is_dir())
         log = self.warnings.read_bytes().decode("utf-8", "replace") if self.warnings.exists() else ""
-        reported = r.err.replace("binary file matches", "") + log + repr(r.notifications)
-        self.assertIn(".git", reported)
+        self.assertIn(".git", r.err)
+        self.assertIn(".git", log)
+        self.assertEqual(len(r.notifications), 1, r.notifications)
+        self.assertNotIn("binary file matches", r.err)
 
-    @known_bug(EVENTS)
+    def test_a_tab_ending_a_name_cannot_hide_a_new_directory(self):
+        # What the new directory holds when inotifywait gets to watch it is
+        # only found through its exact path.
+        bad = q("d\t")
+        r = self.ai("-w", session=f'mkdir "$WORK"/.tmp; touch "$WORK"/.tmp/.envrc; '
+                                  f'mv "$WORK"/.tmp "$WORK"/{bad}; {SETTLE}')
+        self.assertEqual(len(r.notifications), 2, r.notifications)
+        self.assertIn("d?/.envrc", r.notifications[-1][-1])
+
     def test_a_file_name_cannot_forge_a_notification(self):
         # One file, whose name looks like a second line of events.
         r = self.ai("-w", session=f'touch "$WORK"/{q("x" + chr(10) + "CREATE" + chr(9) + ".envrc")}; {SETTLE}')

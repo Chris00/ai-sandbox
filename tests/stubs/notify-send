@@ -1,5 +1,11 @@
 #!/usr/bin/python3 -I
 """Fake notify-send: one JSON list of arguments per line."""
 import json, os, sys
+# Like the real one, which refuses what isn't UTF-8.
+for arg in sys.argv[1:]:
+    try:
+        os.fsencode(arg).decode("utf-8")
+    except UnicodeDecodeError:
+        sys.exit("Invalid UTF-8 provided")
 with open(os.path.join(os.environ["AI_TEST_LOG"], "notifications"), "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")

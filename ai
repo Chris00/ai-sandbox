@@ -610,6 +610,12 @@ markup() {
     printf '%s' "${t//>/&gt;}"
 }
 
+# valid_utf8 TEXT: TEXT without the bytes that aren't UTF-8: notify-send
+# refuses it otherwise, and the notification would be lost.
+valid_utf8() {
+    printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null
+}
+
 # report_trigger DIR PATH: a new $TRIGGERS entry PATH appeared in the
 # work dir DIR.  Log it and, when possible, show a desktop notification.
 report_trigger() {
@@ -621,7 +627,7 @@ report_trigger() {
     if command -v notify-send >/dev/null; then
 	notify-send -a ai -u critical -i "$TRIGGER_ICON" \
 		    "ai: new ${path##*/}" \
-		    "$(markup "$where") was just created, by you or the agent. Review it before using the project on your machine." \
+		    "$(valid_utf8 "$(markup "$where") was just created, by you or the agent. Review it before using the project on your machine.")" \
 		    2>/dev/null
     fi
 }
@@ -634,7 +640,7 @@ report_trigger() {
 watch_agent_events() {
     local name event
     local -A last=()
-    name=$(safe "$1")                   # a title: not markup
+    name=$(valid_utf8 "$(safe "$1")")   # a title: not markup
     while IFS= read -r -n 32 event; do
 	[[ $event =~ ^[a-z_]+$ && -n ${AGENT_EVENTS[$event]+x} ]] || continue
 	(( SECONDS - ${last[$event]:--5} >= 5 )) || continue
@@ -645,10 +651,10 @@ watch_agent_events() {
     done
 }
 
-# watch_triggers DIR: read the events of inotifywait, one "EVENTS<TAB>PATH"
-# per line, and report the new $TRIGGERS entries in DIR.
+# watch_triggers DIR: read the events of inotifywait, NUL-separated
+# "EVENTS<TAB>PATH", and report the new $TRIGGERS entries in DIR.
 watch_triggers() {
-    local dir=$1 events path p
+    local dir=$1 event events path p
     local -a found
     local -A seen
     # The protected entries, including the mount points created
@@ -658,7 +664,9 @@ watch_triggers() {
 	    seen[$p]=1
 	done <"$tmp/protected"
     fi
-    while IFS=$'\t' read -r events path; do
+    while IFS= read -r -d '' event; do
+	events=${event%%$'\t'*}
+	path=${event#*$'\t'}
 	found=()
 	in_list "${path##*/}" "${TRIGGERS[@]}" && found+=("$path")
 	if [[ $events == *ISDIR* ]]; then
@@ -689,7 +697,7 @@ start_watch() {
 		  sed 's/\./\\./g' | paste -sd '|')
     mkfifo "$tmp/watch" || return
     inotifywait -m -r -e create -e moved_to \
-		--exclude "/($exclude)/" --format $'%e\t%w%f' \
+		--exclude "/($exclude)/" --format $'%e\t%w%f%0' --no-newline \
 		"$dir" >"$tmp/watch" 2>"$tmp/watch.log" 7>&- 9>&- &
     watch_pid=$!
     watch_triggers "$dir" <"$tmp/watch" 7>&- 9>&- &
@@ -860,12 +868,29 @@ home_changes() {
 	LC_ALL=C sed -z 's/^\(.\)\t[^\t]*\t/\1 /'
 }
 
-# Entries printed now by "$@" that are not in the snapshot file $1,
-# one per line.
+# The NUL-separated entries printed now by "$@" that are not in the
+# snapshot file $1, NUL-separated too.
 new_since() {
     local before=$1
     shift
-    LC_ALL=C comm -z -13 "$before" <("$@" | LC_ALL=C sort -z) | tr '\0' '\n'
+    LC_ALL=C comm -z -13 "$before" <("$@" | LC_ALL=C sort -z)
+}
+
+# new_triggers: the new or changed $TRIGGERS of the work dir, made safe,
+# one per line.  The protected entries are out of the agent's reach:
+# changes to them are yours.
+new_triggers() {
+    local entry path
+    local -A protected=()
+    if [ -f "$tmp/protected" ]; then
+	while IFS= read -r -d '' path; do
+	    protected[$path]=1
+	done <"$tmp/protected"
+    fi
+    while IFS= read -r -d '' entry; do
+	path=${entry%$'\t'*}
+	[ -n "${protected[$path]}" ] || printf '%s\n' "$(safe "$path")"
+    done < <(new_since "$tmp/triggers.before" host_triggers "$work_path")
 }
 
 if [ -t 1 ]; then
@@ -1753,12 +1778,9 @@ cleanup() {
     fi
     # The snapshots exist only once the sandbox was about to start.
     if [ -f "$tmp/symlinks.before" ] && [ -f "$tmp/triggers.before" ]; then
-	links=$(new_since "$tmp/symlinks.before" outside_symlinks "$work_path")
-	# The protected entries are out of the agent's reach: changes to
-	# them are yours.
-	triggers=$(new_since "$tmp/triggers.before" host_triggers "$work_path" |
-		       cut -f1 |
-		       grep -vxF -f <(tr '\0' '\n' <"$tmp/protected" 2>/dev/null))
+	links=$(new_since "$tmp/symlinks.before" outside_symlinks "$work_path" |
+		    tr '\0' '\n')
+	triggers=$(new_triggers)
     fi
     # The changes to the agent's home: all of them on the terminal, only
     # those that can run code or steer the agent in the log.
