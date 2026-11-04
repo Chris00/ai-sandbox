@@ -1,0 +1,3 @@
+#!/bin/bash
+# Fake ssh-add: keep its arguments and the agent it talks to.
+printf '%s\n' "$SSH_AUTH_SOCK" "$@" >"$AI_TEST_LOG/ssh-add.args"

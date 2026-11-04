@@ -1,0 +1,3 @@
+#!/bin/bash
+# Fake systemd-run: keep its arguments; nothing runs in the scope.
+printf '%s\n' "$@" >"$AI_TEST_LOG/systemd-run.args"

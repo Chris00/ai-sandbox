@@ -1,0 +1,122 @@
+#!/usr/bin/python3 -I
+"""Fake bwrap: record what ai asked for, then act out the session.
+
+It follows bwrap's protocol, so that ai's network setup runs for real:
+it reports its PID on --info-fd, waits on --block-fd, and reads more
+arguments from --args.  Instead of creating a sandbox, it runs the
+shell code $AI_TEST_SESSION on the host, with WORK, LAYER, BASE and
+NOTIFY set to the host paths of what the agent would be given.
+"""
+import json, os, subprocess, sys
+
+ARITY = {
+    "--info-fd": 1, "--block-fd": 1, "--seccomp": 1, "--args": 1,
+    "--bind": 2, "--bind-try": 2, "--ro-bind": 2, "--ro-bind-try": 2,
+    "--setenv": 2, "--dev": 1, "--proc": 1, "--tmpfs": 1, "--chdir": 1,
+    "--overlay-src": 1, "--overlay": 3,
+    "--die-with-parent": 0, "--new-session": 0, "--unshare-all": 0,
+    "--unshare-user": 0, "--disable-userns": 0, "--clearenv": 0,
+}
+
+argv = sys.argv[1:]
+if argv == ["--help"]:
+    print("usage: bwrap [OPTIONS...] [--] COMMAND\n  --overlay-src SRC")
+    sys.exit(0)
+
+# Before this program opens anything else: what ai left open for it.
+open_fds = {}
+for fd in os.listdir("/proc/self/fd"):
+    try:
+        open_fds[fd] = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        pass                            # the listing's own descriptor
+
+log = os.environ["AI_TEST_LOG"]
+
+
+def parse(words):
+    ops, i = [], 0
+    while i < len(words) and words[i].startswith("--"):
+        n = ARITY.get(words[i])
+        if n is None:
+            sys.exit(f"fake bwrap: unknown option {words[i]}: add it to ARITY.")
+        ops.append(words[i:i + n + 1])
+        i += n + 1
+    return ops, words[i:]
+
+
+ops, cmd = parse(argv)
+fds = {o[0]: int(o[1]) for o in ops if o[0] in ("--info-fd", "--block-fd", "--seccomp")}
+args_fds = [int(o[1]) for o in ops if o[0] == "--args"]
+
+# The options from --args, in their place, as bwrap reads them.
+piped = []
+all_ops = []
+for o in ops:
+    if o[0] == "--args":
+        with os.fdopen(int(o[1]), "rb") as f:
+            words = [os.fsdecode(w) for w in f.read().split(b"\0")[:-1]]
+        sub, rest = parse(words)
+        if rest:
+            sys.exit(f"fake bwrap: not options in --args: {rest}")
+        piped += sub
+        all_ops += sub
+    elif o[0] not in ("--info-fd", "--block-fd", "--seccomp"):
+        all_ops.append(o)
+
+seccomp_size = 0
+if "--seccomp" in fds:
+    with os.fdopen(fds["--seccomp"], "rb") as f:
+        seccomp = f.read()
+    seccomp_size = len(seccomp)
+    with open(os.path.join(log, "seccomp.bpf"), "wb") as f:
+        f.write(seccomp)
+
+record = {
+    "argv": argv, "ops": all_ops, "piped": piped, "cmd": cmd, "fds": open_fds,
+    "seccomp_size": seccomp_size,
+}
+
+
+def save():
+    # Lone surrogates (names that aren't UTF-8) survive in JSON's \u form.
+    with open(os.path.join(log, "bwrap.json"), "w") as f:
+        json.dump(record, f)
+
+
+save()
+
+os.write(fds["--info-fd"], b'{\n  "child-pid": %d\n}\n' % os.getpid())
+os.close(fds["--info-fd"])
+
+# What was ready when the network setup released the sandbox.
+os.read(fds["--block-fd"], 1)
+os.close(fds["--block-fd"])
+record["at_release"] = sorted(os.listdir(log))
+save()
+
+
+def src_of(target):
+    for o in all_ops:
+        if o[0] in ("--bind", "--ro-bind") and o[2] == target:
+            return o[1]
+    return None
+
+
+chdir = next((o[1] for o in all_ops if o[0] == "--chdir"), None)
+lower = next((o[1] for o in all_ops if o[0] == "--overlay-src"), None)
+overlay = next((o for o in all_ops if o[0] == "--overlay"), None)
+env = dict(os.environ)
+env["NOTIFY"] = src_of("/run/ai/notify") or ""
+if overlay:
+    env["LAYER"], env["BASE"] = overlay[1], lower
+    env["WORK"] = src_of(chdir)
+else:
+    env["BASE"] = src_of(env["HOME"] + "/") or src_of(env["HOME"]) or ""
+    env["LAYER"], env["WORK"] = "", ""
+
+session = os.environ.get("AI_TEST_SESSION")
+if session is None:
+    sys.exit(0)
+sys.exit(subprocess.run(["/bin/bash", "-c", session], env=env,
+                        cwd=env["WORK"] or env["BASE"]).returncode)

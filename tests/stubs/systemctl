@@ -1,0 +1,3 @@
+#!/bin/bash
+# Fake systemctl: is there a systemd user session?
+[ -z "$AI_TEST_NO_SYSTEMD" ]

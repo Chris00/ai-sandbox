@@ -1,0 +1,5 @@
+#!/usr/bin/python3 -I
+"""Fake notify-send: one JSON list of arguments per line."""
+import json, os, sys
+with open(os.path.join(os.environ["AI_TEST_LOG"], "notifications"), "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")

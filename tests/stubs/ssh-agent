@@ -1,0 +1,6 @@
+#!/bin/bash
+# Fake ssh-agent: a process to stop, reported as the real one does.
+sleep 600 >/dev/null 2>&1 </dev/null &
+printf '%s' "$!" >"$AI_TEST_LOG/ssh-agent.pid"
+printf 'SSH_AUTH_SOCK=%s; export SSH_AUTH_SOCK;\n' "$3"
+printf 'SSH_AGENT_PID=%s; export SSH_AGENT_PID;\n' "$!"

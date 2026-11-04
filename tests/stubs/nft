@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake nft: keep the rules it is given.
+cat >"$AI_TEST_LOG/nft.rules"
+printf '%s\n' "$*" >"$AI_TEST_LOG/nft.args"
+[ -z "$AI_TEST_NFT_FAIL" ]

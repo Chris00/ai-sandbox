@@ -1,0 +1,8 @@
+#!/bin/bash
+# The real python3, except for ai's JOIN_NS: joining the sandbox's
+# namespaces needs a real sandbox.  Just run the command it would run.
+if [ "$1" = -I ] && [ "$2" = -c ] && [[ $3 == *NS_GET_USERNS* ]]; then
+    shift 5                             # -I -c CODE PID WHERE
+    exec "$@"
+fi
+exec /usr/bin/python3 "$@"
