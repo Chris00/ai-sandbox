@@ -71,6 +71,9 @@ AIHOME="$HOME/AI/home"
 #   home.work/  the overlay's work directory.
 PROJECTS="$HOME/AI/projects"
 AI_SSH_KEY="$HOME/.ssh/id_ed25519_ai"
+# The sandbox itself; changeable in the configuration for the tests,
+# which replace it (see tests/README.md).
+BWRAP=/usr/bin/bwrap
 
 # Firewall of the sandbox's network: no access to the local network.
 # 10.0.2.3 is slirp4netns's DNS forwarder; the rest of 10.0.0.0/8,
@@ -1649,9 +1652,9 @@ esac
 
 [ -d "$AIHOME" ] ||
     die "Create the directory '$AIHOME' with minimal configuration files."
-[ -x /usr/bin/bwrap ] ||
+[ -x "$BWRAP" ] ||
     die "bubblewrap is not installed (e.g. 'apt install bubblewrap')."
-/usr/bin/bwrap --help 2>&1 | grep -q -- --overlay-src ||
+"$BWRAP" --help 2>&1 | grep -q -- --overlay-src ||
     die "bubblewrap is too old: version 0.10 or later is needed (--overlay)."
 command -v slirp4netns >/dev/null ||
     die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
@@ -2127,6 +2130,6 @@ exec 11< <(for e in "${env_list[@]}"; do
 # The block pipe is opened read-write: read-only would wait for a
 # writer, and the network subshell only opens it once slirp4netns is
 # ready.
-/usr/bin/bwrap --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" --args 11 "${cmd[@]}" \
-	       3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&-
+"$BWRAP" --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" --args 11 "${cmd[@]}" \
+	 3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&-
 exit $?
