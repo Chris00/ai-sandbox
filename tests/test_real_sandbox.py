@@ -8,7 +8,7 @@ import os
 import unittest
 from pathlib import Path
 
-from harness import AiTestCase, STUBS
+from harness import AiTestCase, STUBS, q
 
 REAL = os.environ.get("AI_TEST_REAL")
 
@@ -54,10 +54,22 @@ class RealSandbox(AiTestCase):
 
     def test_the_system_is_read_only(self):
         self.assertDenied("touch /usr/x")
-        self.assertDenied("touch /etc/x")
+        for path in ("/etc/hosts", "/etc/passwd", "/etc/resolv.conf", "/etc/ssl/x"):
+            self.assertDenied(f"touch {path}")
+
+    def test_the_host_etc_is_not_there(self):
+        # /etc itself is a directory of the sandbox's own root: what is written
+        # there is lost with the session, and only the files ai mounts are seen.
+        self.assertDenied("test -e /etc/shadow")
+        self.assertOk(self.sandboxed("touch /etc/x"))
+        self.assertDenied("test -e /etc/x")
 
     def test_the_host_filesystem_is_not_reachable_through_proc(self):
-        self.assertDenied(f"ls /proc/1/root{self.home}")
+        # Each process seen has the sandbox's root, where $HOME is the agent's.
+        secret = self.home / "secret"
+        secret.write_text("x")
+        self.assertOk(self.sandboxed("test -d /proc/1/root/usr"))  # the way works
+        self.assertDenied(f'for p in /proc/[0-9]*/root; do test -e "$p"{q(str(secret))} && exit 0; done; exit 1')
 
     def test_the_environment_is_cleared(self):
         r = self.sandboxed("env", env={"HOST_SECRET": "hunter2"})
