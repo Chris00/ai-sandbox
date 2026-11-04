@@ -739,9 +739,10 @@ home_match() {
     return 1
 }
 
-# home_changes: report the changes to the agent's home during the
-# session, compared with $tmp/home.before, if any touches the
-# $HOME_TRIGGERS.
+# home_changes: at exit, list the changes the session made to the
+# agent's home (since the snapshot $tmp/home.before), if any of them
+# touches the $HOME_TRIGGERS.  Of the other changes, only their number
+# is given, those of $HOME_IGNORE left out.
 home_changes() {
     local type ctime path n=0
     local -a found=()
