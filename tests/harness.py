@@ -47,7 +47,7 @@ NAMES = {
     "escape": "a\x1b[31mb",
     "c1_csi": "a\u009b31mb",
     "carriage_return": "a\rb",
-    "markup": "<b>a&b</b>",
+    "markup": "<b>a&b",
 }
 
 
