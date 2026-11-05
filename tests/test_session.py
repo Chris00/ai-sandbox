@@ -492,6 +492,14 @@ class Warnings(AiTestCase):
         self.assertShownPath(r, "linked")
         self.assertOk(self.ai("-w", answers=["y"]))
 
+    def test_a_cache_prefix_leading_back_into_the_work_dir(self):
+        (self.work / "x.py").touch()
+        for prefix in ("relative", "../proj/cache", "../elsewhere"):
+            with self.subTest(prefix=prefix):
+                r = self.ai("-w", env=dict(PYTHONPYCACHEPREFIX=prefix))
+                self.assertOk(r)
+                self.assertIn("PYTHONPYCACHEPREFIX is not an absolute path", r.err)
+
     def assertShownPath(self, r, name):
         self.assertIn(str(self.work / name), r.err)
 

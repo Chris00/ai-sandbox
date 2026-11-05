@@ -43,6 +43,10 @@ class Signals(AiTestCase):
     def test_terminate(self):
         self.stop(signal.SIGTERM, 143)
 
+    def test_a_sandbox_killed_by_a_signal(self):
+        r = self.ai("-w", session="kill -KILL $PPID; sleep 0.1")
+        self.assertEqual(r.rc, 128 + signal.SIGKILL, repr(r))
+
     def test_the_locks_are_free_after_a_signal(self):
         self.stop(signal.SIGTERM, 143)
         self.assertOk(self.ai("-w"))
@@ -52,11 +56,12 @@ class Signals(AiTestCase):
         # bwrap ends, and the session with it, as --die-with-parent would.
         running, (ai, bwrap) = self.hold()
         os.kill(ai, signal.SIGTERM)
+        self.assertTrue(running.finished(10))
+        stopped = not os.path.exists(f"/proc/{bwrap}")
         (running.logdir / "stop").touch()
         r = running.wait()
         self.assertEqual(r.rc, 143, repr(r))
-        with self.assertRaises(ProcessLookupError):
-            os.kill(bwrap, 0)
+        self.assertTrue(stopped, "bwrap outlived ai")
 
 
 class Terminal(AiTestCase):

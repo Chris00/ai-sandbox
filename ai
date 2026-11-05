@@ -2169,7 +2169,9 @@ def forget(cfg, given):
             continue
         refs = capture(git("-C", repo, "for-each-ref", "--format=delete %(refname)",
                            "refs/remotes/ai/")) or ""
-        if not subprocess.run(git("-C", repo, "update-ref", "--stdin"),
+        # --no-deref: deleting ai/HEAD, which fetch can create, would otherwise
+        # also delete the branch it points to, which fails the whole transaction.
+        if not subprocess.run(git("-C", repo, "update-ref", "--no-deref", "--stdin"),
                               input=f"{refs}\n".encode(**ENCODING) if refs else b"").returncode:
             print(f"Repo {rel_to_pwd(repo)}: ai remote removed.")
     remove_tree(project)

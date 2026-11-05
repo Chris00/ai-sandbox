@@ -1686,7 +1686,7 @@ forget() {
 		/usr/bin/git config --file "$g/config" --remove-section remote.ai &&
 		    git -C "${g%/.git}" for-each-ref --format='delete %(refname)' \
 			refs/remotes/ai/ |
-			git -C "${g%/.git}" update-ref --stdin &&
+			git -C "${g%/.git}" update-ref --no-deref --stdin &&
 		    echo "Repo $(rel_to_pwd "${g%/.git}"): ai remote removed."
 		;;
 	esac

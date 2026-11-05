@@ -34,6 +34,15 @@ class Status(ProjectCase):
     def test_no_project(self):
         self.assertRefused(self.ai("--status"), "No project here")
 
+    def test_a_branch_of_the_agent_with_no_valid_commit(self):
+        self.make_repo()
+        self.assertOk(self.ai("-w", answers=["y"]))
+        clone = self.project_dir() / "git/.git"
+        (clone / "refs/heads/bad").write_text("not an object name\n")
+        r = self.ai("--status")
+        self.assertOk(r)
+        self.assertNotIn("ai/bad", r.out)
+
     def test_a_project(self):
         self.assertOk(self.ai("-w"))
         r = self.ai("--status")
@@ -191,6 +200,13 @@ class Promote(ProjectCase):
     def setUp(self):
         super().setUp()
         self.assertOk(self.ai("-w"))
+
+    def test_the_contents_shown_cannot_drive_the_terminal(self):
+        self.assertOk(self.ai("-w", session=r"""
+            printf 'a\033[31mb\302\233c\n' >"$LAYER/evil" """))
+        r = self.ai("--promote", "evil", answers=["n"])
+        self.assertSafe(r.out)
+        self.assertIn("a?[31mb?c", r.out)
 
     def test_not_in_a_project(self):
         self.assertRefused(self.ai("--promote", ".bashrc", cwd=self.outside), "No project here")
@@ -379,6 +395,21 @@ class Reset(ProjectCase):
 
 
 class Forget(ProjectCase):
+    def test_no_hook_of_your_repo_runs_when_the_fetched_refs_are_deleted(self):
+        self.make_repo()
+        self.assertOk(self.ai("-w", answers=["y"]))
+        self.git("fetch", "-q", "ai")
+        self.assertIn("ai/main", self.git("branch", "-r"))
+        hook = self.work / ".git/hooks/reference-transaction"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(f"#!/bin/sh\ntouch {self.outside}/pwned\n")
+        hook.chmod(0o755)
+        r = self.ai("--forget", answers=["y"])
+        self.assertOk(r)
+        self.assertIn("ai remote removed", r.out)
+        self.assertNotIn("ai/", self.git("branch", "-r"))
+        self.assertFalse((self.outside / "pwned").exists())
+
     def test_no_project(self):
         self.assertRefused(self.ai("--forget"), "No project here")
 

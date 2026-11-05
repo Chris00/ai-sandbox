@@ -206,6 +206,13 @@ class HomeReport(AiTestCase):
 
 
 class LiveNotifications(AiTestCase):
+    def test_changes_to_a_protected_entry_are_yours(self):
+        # Out of the agent's reach: only you can have made them.
+        (self.work / ".envrc").touch()
+        r = self.ai("-w", session=f'rm "$WORK/.envrc"; touch "$WORK/.envrc"; {SETTLE}')
+        self.assertOk(r)
+        self.assertEqual(r.notifications, [])
+
     def test_a_new_tool_file_is_reported_during_the_session(self):
         (self.work / "sub").mkdir()
         r = self.ai("-w", session=f'touch "$WORK/sub/.envrc"; {SETTLE}')
@@ -275,6 +282,10 @@ class AgentEvents(AiTestCase):
                 self.assertEqual(len(found), 1, found)
                 self.assertIn(text, found[0][-1])
                 self.assertIn("proj", found[0][-2])
+
+    def test_they_do_not_stay_on_the_desktop(self):
+        found = self.events('echo stop >"$NOTIFY"')
+        self.assertIn("--hint=boolean:transient:true", found[0])
 
     def test_the_sandbox_never_chooses_the_text(self):
         for word in ("<b>evil</b>", "rm -rf", "evil", "STOP", "stop now", "$(touch x)", "__proto__", "x" * 64):
