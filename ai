@@ -1006,9 +1006,14 @@ class WorkDir:
         return "\n".join(lines)
 
     def inner_mounts(self):
-        """File systems mounted inside it (bwrap binds recursively)."""
+        """File systems mounted inside it (bwrap binds recursively), one per
+        line, made safe.  findmnt -r writes each byte that isn't printable
+        ASCII, the space and "\\" included, as \\xHH: decoded, or a work dir
+        whose path holds one would match none."""
         out = capture(["findmnt", "-rn", "-o", "TARGET"]) or ""
-        return "\n".join(m for m in out.split("\n") if m.startswith(f"{self.path}/"))
+        mounts = (os.fsdecode(re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m[1], 16)]),
+                                    os.fsencode(line))) for line in out.split("\n"))
+        return "\n".join(safe(m) for m in mounts if m.startswith(f"{self.path}/"))
 
     def inner_sockets(self):
         """Unix sockets or named pipes in it, one per line, made safe.  They
@@ -1578,8 +1583,12 @@ class Session:
             home_all = summarize_home(cfg, changes)
             home_warn = summarize_home(cfg, changes, only_triggers=True)
         if links or triggers or home_warn:
-            with open(cfg.AI_LOG, "a", **ENCODING) as log:
-                log.write(self.report(links, triggers, home_warn))
+            # Not writable: the report on the terminal must still come.
+            try:
+                with open(cfg.AI_LOG, "a", **ENCODING) as log:
+                    log.write(self.report(links, triggers, home_warn))
+            except OSError as e:
+                warn(f"ai: {safe(cfg.AI_LOG)}: {e.strerror}.")
         if links or triggers or home_all:
             sys.stderr.write(self.report(links, triggers, home_all))
             sys.stderr.flush()

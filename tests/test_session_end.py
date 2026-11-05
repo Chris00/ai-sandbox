@@ -70,7 +70,8 @@ class Terminal(AiTestCase):
     def on_terminal(self, *args):
         """Run ai with its standard output on a terminal."""
         command = " ".join(q(str(a)) for a in (AI, *args))
-        env = self.environment(dict(AI_TEST_LOG=str(self.outside)))
+        # script runs the command with $SHELL, and q quotes for bash.
+        env = self.environment(dict(AI_TEST_LOG=str(self.outside), SHELL="/bin/bash"))
         return subprocess.run(["script", "-qefc", command, "/dev/null"],
                               cwd=self.work, env=env, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, errors="replace")
@@ -101,6 +102,29 @@ class Mounts(AiTestCase):
         r = self.ai("-w", env=dict(AI_TEST_MOUNTS=f"/\n{self.home}/other"))
         self.assertOk(r)
         self.assertNotIn("File systems", r.err)
+
+    def test_names_escaped_by_findmnt_are_decoded(self):
+        # findmnt -r writes each byte that isn't printable ASCII, the space
+        # and "\" included, as \xHH.
+        work = self.home / "my \\x20 é"
+        work.mkdir()
+        disk = os.fsencode(f"{work}/disk")
+        raw = "".join(chr(b) if 0x21 <= b <= 0x7e and b != 0x5c else f"\\x{b:02x}"
+                      for b in disk)
+        env = dict(AI_TEST_MOUNTS=f"/\n{raw}")
+        self.assertRefused(self.ai("-w", cwd=work, env=env),
+                           "File systems mounted inside the work dir")
+        r = self.ai("-w", cwd=work, env=env, answers=["y"])
+        self.assertOk(r)
+        self.assertIn(f"  {work}/disk\n", r.err)
+
+
+class Log(AiTestCase):
+    def test_the_report_is_shown_even_if_the_log_is_not_writable(self):
+        self.warnings.mkdir()
+        r = self.ai("-w", session='touch "$WORK/.npmrc"')
+        self.assertIn(f"{self.work}/.npmrc\n", r.err)
+        self.assertIn("warnings.log", r.err)
 
 
 class Locale(AiTestCase):

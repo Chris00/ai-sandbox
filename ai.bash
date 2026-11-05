@@ -575,11 +575,16 @@ outside_hardlinks() {
 	safe_lines
 }
 
-# File systems mounted inside $1 (bwrap binds recursively).
+# File systems mounted inside $1 (bwrap binds recursively), one per
+# line, made safe.  findmnt -r writes each byte that isn't printable
+# ASCII, the space and "\" included, as \xHH: decoded by %b, or a work
+# dir whose path holds one would match none.
 inner_mounts() {
     local m
     findmnt -rn -o TARGET | while IFS= read -r m; do
-	case $m in "$1"/*) echo "$m" ;; esac
+	m=$(printf '%b.' "$m")
+	m=${m%.}
+	case $m in "$1"/*) safe "$m"; echo ;; esac
     done
 }
 
