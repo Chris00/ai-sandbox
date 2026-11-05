@@ -671,7 +671,9 @@ watch_agent_events() {
     local name event
     local -A last=()
     name=$(valid_utf8 "$(safe "$1")")   # a title: not markup
-    while IFS= read -r -n 32 event; do
+    # LC_ALL=C: in bytes.  In UTF-8, a byte starting a character would
+    # take the newline and the next word with it.
+    while IFS= LC_ALL=C read -r -n 32 event; do
 	[[ $event =~ ^[a-z_]+$ && -n ${AGENT_EVENTS[$event]+x} ]] || continue
 	(( SECONDS - ${last[$event]:--5} >= 5 )) || continue
 	last[$event]=$SECONDS
@@ -1830,6 +1832,14 @@ cleanup() {
 	wait "$watch_reader" 2>/dev/null   # it ends with inotifywait's output
     fi
     if [ -n "$agent_events_pid" ]; then
+	# Without ai's end, the reader shows what is left in the pipe, then
+	# sees its end: the hooks went with the sandbox.  Unless something
+	# still holds it, after a signal: then it is stopped.
+	exec 12>&-
+	for ((p = 0; p < 40; p++)); do
+	    kill -0 "$agent_events_pid" 2>/dev/null || break
+	    sleep 0.05
+	done
 	kill "$agent_events_pid" 2>/dev/null
 	wait "$agent_events_pid" 2>/dev/null
     fi
@@ -2197,15 +2207,17 @@ slirp=$!
 
 # --- Run ----------------------------------------------------------------
 
-# The agent's events.  Read-write, so that the reader never sees an end
-# of file when a hook closes the pipe, and a hook never waits for a
-# reader.
+# The agent's events.  ai holds the pipe open for writing (fd 12) for
+# the whole session, so that a hook never waits for a reader, and the
+# reader sees no end of file when a hook closes it: only once cleanup
+# closes it, after reading what is left.  Each open waits for the other.
 if [ -n "$work_path" ]; then
-    watch_agent_events "${work_path##*/}" <>"$tmp/notify" 7>&- 9>&- &
+    watch_agent_events "${work_path##*/}" <"$tmp/notify" 7>&- 9>&- &
 else
-    watch_agent_events "the agent's home" <>"$tmp/notify" 7>&- 9>&- &
+    watch_agent_events "the agent's home" <"$tmp/notify" 7>&- 9>&- &
 fi
 agent_events_pid=$!
+exec 12>"$tmp/notify"
 
 # For the report at exit on the agent's home: in a project, its whole
 # layer (its changes); otherwise, the $HOME_TRIGGERS of the base home.
@@ -2230,5 +2242,5 @@ exec 11< <(for e in "${env_list[@]}"; do
 # writer, and the network subshell only opens it once slirp4netns is
 # ready.
 "$BWRAP" --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" --args 11 "${cmd[@]}" \
-	 3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&-
+	 3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&- 12>&-
 exit $?

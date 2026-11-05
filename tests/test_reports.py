@@ -293,6 +293,15 @@ class AgentEvents(AiTestCase):
         found = self.events('echo stop >"$NOTIFY"; sleep 0.1; exec 3>"$NOTIFY"; exec 3>&-; echo input >"$NOTIFY"')
         self.assertEqual(len(found), 2, found)
 
+    def test_the_last_event_is_shown(self):
+        # Written as the session ends, with garbage before it to read
+        # first: it isn't lost at exit.
+        r = self.ai("-w", session='{ head -c 10000 /dev/urandom | tr -d "\\n"; echo; '
+                                  'echo stop; } >"$NOTIFY"')
+        self.assertOk(r)
+        self.assertEqual(len(r.notifications), 1, r.notifications)
+        self.assertEqual(r.leftovers, [])
+
     def test_binary_garbage_is_ignored(self):
         found = self.events('{ head -c 10000 /dev/urandom | tr -d "\\n"; echo; } >"$NOTIFY"; sleep 0.5; echo stop >"$NOTIFY"')
         self.assertEqual(len(found), 1, found)
