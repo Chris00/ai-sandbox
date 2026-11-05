@@ -2138,9 +2138,17 @@ fi
 # runs CMD, keeping your credentials.  Python's own file descriptors
 # aren't passed on to CMD.
 JOIN_NS='
-import fcntl, os, sys
+import fcntl, os, sys, time
 NS_GET_USERNS = 0xb701                  # linux/nsfs.h
 pid, where, *cmd = sys.argv[1:]
+# bwrap reports the PID before the sandbox has mapped your user in its
+# namespace: joining it earlier would give no rights there.  Once the
+# sandbox is nested, its own namespace is mapped, its parent long before.
+for _ in range(500):
+    with open(f"/proc/{pid}/uid_map") as uid_map:
+        if uid_map.read().strip():
+            break
+    time.sleep(0.01)
 net = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
 os.setns(fcntl.ioctl(net, NS_GET_USERNS), os.CLONE_NEWUSER)
 if where == "net":
