@@ -678,7 +678,8 @@ watch_agent_events() {
 	(( SECONDS - ${last[$event]:--30} >= 30 )) || continue
 	last[$event]=$SECONDS
 	command -v notify-send >/dev/null &&
-	    notify-send --transient -a ai -i "$AGENT_EVENT_ICON" "ai: $name" \
+	    notify-send --hint=boolean:transient:true \
+			-a ai -i "$AGENT_EVENT_ICON" "ai: $name" \
 			"The agent ${AGENT_EVENTS[$event]}." 2>/dev/null
     done
 }
