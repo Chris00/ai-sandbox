@@ -9,10 +9,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
-    # Not the real sandbox (test_real_sandbox.py): it needs bubblewrap 0.10
-    # or later, which this Ubuntu doesn't have.  Run it on the host.
+    # test_real_sandbox.py needs bubblewrap ≥ 0.10, which this runner lacks.
+    # Run it separately on a host with a sufficiently recent bubblewrap.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
