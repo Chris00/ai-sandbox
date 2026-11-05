@@ -665,7 +665,7 @@ report_trigger() {
 # watch_agent_events NAME: read the events the agent reports on stdin
 # (the pipe $AI_NOTIFY), one word per line, and show a notification
 # about the session NAME for those of $AGENT_EVENTS, at most one of
-# each every 5 seconds, so that the agent can't flood your desktop.
+# each every 30 seconds, so that the agent can't flood your desktop.
 # Words are cut at 32 bytes: the rest is read as another one.
 watch_agent_events() {
     local name event
@@ -675,7 +675,7 @@ watch_agent_events() {
     # take the newline and the next word with it.
     while IFS= LC_ALL=C read -r -n 32 event; do
 	[[ $event =~ ^[a-z_]+$ && -n ${AGENT_EVENTS[$event]+x} ]] || continue
-	(( SECONDS - ${last[$event]:--5} >= 5 )) || continue
+	(( SECONDS - ${last[$event]:--30} >= 30 )) || continue
 	last[$event]=$SECONDS
 	command -v notify-send >/dev/null &&
 	    notify-send -a ai -i "$AGENT_EVENT_ICON" "ai: $name" \
