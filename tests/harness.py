@@ -23,6 +23,8 @@ from pathlib import Path
 TESTS = Path(__file__).resolve().parent
 STUBS = TESTS / "stubs"
 AI = Path(os.environ.get("AI_TEST_PROGRAM", TESTS.parent / "ai")).resolve()
+# The bash version, kept as a reference, reads a configuration in bash.
+IS_BASH = AI.read_bytes().startswith(b"#!/bin/bash")
 SHOW_KNOWN_BUGS = bool(os.environ.get("AI_TEST_SHOW_KNOWN_BUGS"))
 TIMEOUT = 60
 
@@ -288,15 +290,24 @@ class AiTestCase(unittest.TestCase):
 
     # --- The configuration: the one place that knows its format. --------
 
-    def write_config(self, *lines):
-        """Write ~/AI/config, in the language of `ai`'s configuration."""
-        path = self.home / "AI/config"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        text = ""
+    @property
+    def config_path(self):
+        return self.home / ("AI/config" if IS_BASH else "AI/config.py")
+
+    def write_config(self, add=None, **settings):
+        """Write `ai`'s configuration: set the given settings, and extend
+        the lists of `add`, a dictionary, in the language it reads."""
         if self.fake_sandbox:
-            text += f"BWRAP={shlex_quote(str(STUBS / 'bwrap'))}\n"
-        text += "".join(line + "\n" for line in lines)
-        path.write_text(text)
+            settings.setdefault("BWRAP", str(STUBS / "bwrap"))
+        render = render_bash if IS_BASH else render_python
+        text = "".join(render(name, value, False) for name, value in settings.items())
+        text += "".join(render(name, value, True) for name, value in (add or {}).items())
+        return self.write_config_text(text)
+
+    def write_config_text(self, text):
+        path = self.config_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, errors="surrogateescape")
         path.chmod(0o600)
         return path
 
@@ -421,5 +432,14 @@ class AiTestCase(unittest.TestCase):
         self.assertEqual(bad, [], f"control characters in: {text!r}")
 
 
-def shlex_quote(s):
-    return "'" + s.replace("'", "'\\''") + "'"
+def render_python(name, value, extend):
+    return f"{name} {'+=' if extend else '='} {value!r}\n"
+
+
+def render_bash(name, value, extend):
+    def quote(v):
+        return "'" + v.replace("'", "'\\''") + "'"
+    if isinstance(value, str):
+        return f"{name}={quote(value)}\n"
+    words = " ".join(map(quote, value))
+    return f"{name}{'+=' if extend else '='}({words})\n"

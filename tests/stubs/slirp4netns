@@ -1,8 +1,11 @@
 #!/bin/bash
 # Fake slirp4netns: say it is ready on the descriptor it is given, then
 # wait to be stopped, as the real one does.
+for arg; do
+    case $arg in --ready-fd=*) ready=${arg#*=} ;; esac
+done
 printf '%s\n' "$*" >"$AI_TEST_LOG/slirp.args"
 [ -z "$AI_TEST_SLIRP_FAIL" ] || exit 1
-printf 1 >&3
-exec 3>&-
+printf 1 >&"$ready"
+eval "exec $ready>&-"
 exec sleep 600

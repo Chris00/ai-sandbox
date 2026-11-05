@@ -1,0 +1,3 @@
+#!/bin/bash
+# Fake findmnt: the mounts a test chooses, one per line, raw.
+[ -z "$AI_TEST_MOUNTS" ] || printf '%s\n' "$AI_TEST_MOUNTS"

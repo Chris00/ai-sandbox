@@ -108,7 +108,7 @@ class Environment(AiTestCase):
         self.assertNotIn("AI_PROJECT", self.ai().bwrap.env())
 
     def test_secrets_stay_off_the_command_line(self):
-        self.write_config("AI_ENV=(TOKEN=hunter2)")
+        self.write_config(AI_ENV=["TOKEN=hunter2"])
         r = self.ai("-w")
         self.assertEqual(r.bwrap.env()["TOKEN"], "hunter2")
         self.assertNotIn("hunter2", repr(r.bwrap.argv))
@@ -116,12 +116,11 @@ class Environment(AiTestCase):
 
     def test_values_are_kept_exactly(self):
         value = "a b\tc\nd=e*'\"$(f)"
-        escaped = "".join(f"\\x{b:02x}" for b in value.encode())
-        self.write_config(f"AI_ENV=($'V={escaped}')")
+        self.write_config(AI_ENV=[f"V={value}"])
         self.assertEqual(self.ai("-w").bwrap.env()["V"], value)
 
     def test_project_variables_only_in_projects(self):
-        self.write_config("AI_PROJECT_ENV=(ONLY=project)", "AI_ENV=(ALWAYS=yes)")
+        self.write_config(AI_PROJECT_ENV=["ONLY=project"], AI_ENV=["ALWAYS=yes"])
         env = self.ai("-w").bwrap.env()
         self.assertEqual((env["ONLY"], env["ALWAYS"]), ("project", "yes"))
         env = self.ai().bwrap.env()
@@ -133,7 +132,7 @@ class Environment(AiTestCase):
         self.assertNotIn("DISABLE_AUTOUPDATER", self.ai().bwrap.env())
 
     def test_configured_variables_can_replace_those_of_ai(self):
-        self.write_config("AI_ENV=(PATH=/custom)")
+        self.write_config(AI_ENV=["PATH=/custom"])
         self.assertEqual(self.ai("-w").bwrap.env()["PATH"], "/custom")
 
 

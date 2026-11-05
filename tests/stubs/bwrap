@@ -74,7 +74,7 @@ if "--seccomp" in fds:
 
 record = {
     "argv": argv, "ops": all_ops, "piped": piped, "cmd": cmd, "fds": open_fds,
-    "seccomp_size": seccomp_size,
+    "seccomp_size": seccomp_size, "pid": os.getpid(), "ppid": os.getppid(),
 }
 
 

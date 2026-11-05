@@ -144,7 +144,7 @@ class HomeReport(AiTestCase):
         self.assertNotIn("Changed in the agent's", r.err)
 
     def test_a_trigger_inside_an_ignored_directory_is_shown(self):
-        self.write_config("HOME_TRIGGERS+=(.cache/evil)")
+        self.write_config(add=dict(HOME_TRIGGERS=[".cache/evil"]))
         r = self.changed(".cache/evil")
         self.assertIn("! .cache/evil", r.err)
 

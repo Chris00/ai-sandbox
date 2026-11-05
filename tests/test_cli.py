@@ -2,7 +2,7 @@
 import os
 import unittest
 
-from harness import AiTestCase
+from harness import AI, AiTestCase
 
 
 class Options(AiTestCase):
@@ -89,7 +89,7 @@ class Limits(AiTestCase):
         # ai again, with the same arguments, in the scope.
         sep = args.index("--")
         self.assertEqual(args[sep + 1:][1:], ["-w", "--", "tool", "x y"])
-        self.assertEqual(os.path.basename(args[sep + 1]), "ai")
+        self.assertEqual(os.path.basename(args[sep + 1]), AI.name)
 
     def test_defaults(self):
         _, args = self.limits()
@@ -133,31 +133,31 @@ class Config(AiTestCase):
         target = self.outside / "config"
         target.write_text(self.write_config().read_text())
         target.chmod(0o666)
-        path = self.home / "AI/config"
+        path = self.config_path
         path.unlink()
         path.symlink_to(target)
         self.assertRefused(self.ai("-w"), "writable by you only")
 
     def test_it_is_optional(self):
         # Only the fake sandbox is missing, which the checks report.
-        (self.home / "AI/config").unlink()
+        self.config_path.unlink()
         r = self.ai("--list")
         self.assertOk(r)
 
     def test_invalid_environment_entries(self):
         for bad in ("NOVALUE", "1BAD=x", "A-B=x", "=x", ""):
             with self.subTest(entry=bad):
-                self.write_config(f"AI_ENV=({bad!r})")
+                self.write_config(AI_ENV=[bad])
                 self.assertRefused(self.ai("-w"), "NAME=value")
 
     def test_an_invalid_entry_does_not_show_its_value(self):
-        self.write_config("AI_ENV=('1BAD=hunter2')")
+        self.write_config(AI_ENV=["1BAD=hunter2"])
         r = self.ai("-w")
         self.assertRefused(r, "NAME=value")
         self.assertNotIn("hunter2", r.text)
 
     def test_lists_can_be_extended(self):
-        self.write_config("READONLY+=(myconfig)", "PRIVATE+=(_build)")
+        self.write_config(add=dict(READONLY=["myconfig"], PRIVATE=["_build"]))
         (self.work / "myconfig").write_text("x")
         (self.work / "_build").mkdir()
         r = self.ai("-w")
@@ -173,14 +173,14 @@ class Checks(AiTestCase):
         self.assertRefused(self.ai("-w"), "Create the directory")
 
     def test_bwrap_is_needed(self):
-        self.write_config(f"BWRAP={self.root}/none")
+        self.write_config(BWRAP=f"{self.root}/none")
         self.assertRefused(self.ai("-w"), "bubblewrap is not installed")
 
     def test_bwrap_must_know_overlays(self):
         old = self.outside / "bwrap"
         old.write_text("#!/bin/sh\necho usage\n")
         old.chmod(0o755)
-        self.write_config(f"BWRAP={old}")
+        self.write_config(BWRAP=str(old))
         self.assertRefused(self.ai("-w"), "bubblewrap is too old")
 
     def test_ssh_needs_its_key(self):
@@ -227,7 +227,7 @@ class Refused(AiTestCase):
 
     def test_ai_own_files_moved_by_the_configuration(self):
         moved = self.home / "elsewhere/projects"
-        self.write_config(f'PROJECTS="{moved}"')
+        self.write_config(PROJECTS=str(moved))
         self.refused(moved / "x", "the sandbox's own files")
         self.refused(moved.parent, "the sandbox's own files")
 
@@ -237,12 +237,12 @@ class Refused(AiTestCase):
         self.refused(forbidden / "sub", "FORBID_WORK")
 
     def test_a_directory_containing_a_forbidden_one(self):
-        self.write_config(f'FORBID_WORK=("{self.home}/a/secret")')
+        self.write_config(FORBID_WORK=[f"{self.home}/a/secret"])
         self.refused(self.home / "a", "FORBID_WORK")
 
     def test_the_directory_of_the_ssh_key_moved_by_the_configuration(self):
         key = self.home / "keys/ai_key"
-        self.write_config(f'AI_SSH_KEY="{key}"')
+        self.write_config(AI_SSH_KEY=str(key))
         self.refused(key.parent, "the sandbox's own files")
 
     def test_nothing_is_kept_after_a_refusal(self):

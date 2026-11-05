@@ -50,7 +50,7 @@ class RealSandbox(AiTestCase):
         secret = self.home / "secret"
         secret.write_text("x")
         self.assertDenied(f"test -e {secret}")
-        self.assertDenied(f"cat {self.home}/AI/config")
+        self.assertDenied(f"cat {self.config_path}")
 
     def test_the_system_is_read_only(self):
         self.assertDenied("touch /usr/x")
@@ -76,7 +76,7 @@ class RealSandbox(AiTestCase):
         self.assertNotIn("hunter2", r.out)
 
     def test_secrets_do_not_show_in_the_process_list(self):
-        self.write_config("AI_ENV=(TOKEN=hunter2)")
+        self.write_config(AI_ENV=["TOKEN=hunter2"])
         r = self.sandboxed('echo "$TOKEN"; cat /proc/*/cmdline 2>/dev/null | tr "\\0" " "')
         self.assertEqual(r.out.split("\n")[0], "hunter2")
         self.assertNotIn("hunter2", r.out.split("\n", 1)[1])
