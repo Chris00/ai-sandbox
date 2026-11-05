@@ -2162,12 +2162,17 @@ os.execvp(cmd[0], cmd)
 	[ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null
 	exit 1
     }
-    while IFS= read -r line; do
+    exec 5<"$tmp/info"
+    while IFS= read -r line <&5; do
 	if [[ $line =~ \"child-pid\":\ *([0-9]+) ]]; then
 	    pid=${BASH_REMATCH[1]}
 	    break
 	fi
-    done <"$tmp/info"
+    done
+    # bwrap goes on writing to the pipe: closing it would kill bwrap
+    # (SIGPIPE).  Read the rest, until bwrap closes it.
+    cat <&5 >/dev/null &
+    exec 5<&-
     [ -n "$pid" ] || exit 1
     # Firewall in the sandbox's network namespace, set as root of the
     # namespace that owns it: the sandbox cannot change it.
