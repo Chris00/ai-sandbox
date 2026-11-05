@@ -773,7 +773,9 @@ The paths are set at the top of the script, and can be changed in
 
 A project's directory is named after the project's path, escaped by
 `systemd-escape` so that two projects never nest (`~/software/proj`
-gives `home-you-software-proj`).  It holds:
+gives `home-you-software-proj`).  A name that would be too long for a
+file name keeps its first 183 characters, followed by a hash of the
+whole path.  It holds:
 
 | Path      | Contents                                                       |
 |-----------|----------------------------------------------------------------|

@@ -909,9 +909,17 @@ fi
 
 # project_dir DIR: the directory of $PROJECTS for the project DIR (a
 # `realpath`): its path escaped by systemd-escape, so that projects
-# never nest, and readable ("home-you-software-proj").
+# never nest, and readable ("home-you-software-proj").  A long path,
+# all the more a non-ASCII one (each byte gives 4 characters), would
+# exceed the 255 bytes of a file name: its name then keeps only the
+# beginning, followed by a hash of the whole path.
 project_dir() {
-    printf '%s/%s' "$PROJECTS" "$(systemd-escape --path -- "$1")"
+    local name
+    name=$(systemd-escape --path -- "$1") || exit 1
+    if [ ${#name} -gt 200 ]; then       # ASCII: characters are bytes
+	name="${name:0:183}-$(printf '%s' "$1" | sha256sum | cut -c1-16)"
+    fi
+    printf '%s/%s' "$PROJECTS" "$name"
 }
 
 # check_plain_config G: refuse to go on unless the config of the .git

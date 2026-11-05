@@ -2,7 +2,7 @@
 import os
 import unittest
 
-from harness import AiTestCase, known_bug, q
+from harness import AiTestCase, q
 
 
 class ProjectCase(AiTestCase):
@@ -157,13 +157,21 @@ class List(ProjectCase):
         self.assertRegex(r.out, r"~/software/proj +\S+ +\d{4}-\d\d-\d\d \d\d:\d\d\n")
         self.assertRegex(r.out, r"~/other +\S+ +\d{4}-\d\d-\d\d \d\d:\d\d\n")
 
-    @known_bug("project_dir: systemd-escape turns each non-ASCII byte into 4 "
-               "characters, and a project's whole path into one directory name, "
-               "so a long path exceeds NAME_MAX and ai -w can't start there")
     def test_a_long_path_can_be_a_project(self):
         long = self.home / ("é" * 40)
         long.mkdir()
         self.assertOk(self.ai("-w", cwd=long))
+
+    def test_long_paths_alike_are_two_projects(self):
+        # Their names are cut: what tells them apart is past the cut.
+        one, two = self.home / ("é" * 60 + "1"), self.home / ("é" * 60 + "2")
+        for d in (one, two):
+            d.mkdir()
+            self.assertOk(self.ai("-w", cwd=d))
+        self.assertEqual(len(os.listdir(self.projects)), 2)
+        r = self.ai("--list")
+        self.assertIn(f"~/{one.name} ", r.out)
+        self.assertIn(f"~/{two.name} ", r.out)
 
     def test_the_columns_line_up_with_non_ascii_names(self):
         wide = self.home / "é€é€"
