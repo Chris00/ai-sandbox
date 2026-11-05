@@ -165,7 +165,9 @@ HOME_IGNORE=(
     .cache
     # Claude Code: its state (~/.claude.json, rewritten at every start,
     # though it also holds the MCP servers), transcripts, to-do lists...
+    .claude/daemon.lock .claude/daemon.log .claude/daemon.status.json
     .claude.json .claude.json.backup .claude/projects/*.jsonl
+    .claude/file-history .claude/.last-cleanup .claude/paste-cache
     .claude/todos .claude/shell-snapshots .claude/statsig
     .claude/backups .claude/cache .claude/history.jsonl
     .npm                                # npm's cache
