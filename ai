@@ -230,14 +230,26 @@ AI_CONFIG="$HOME/AI/config"
 # characters, which could drive your terminal, replaced by "?"; but
 # safe_text keeps tabs and newlines.  For what may come from the agent:
 # the names of files in the work dir, for one, so for every path shown.
-# (LC_ALL=C: bytes, which leaves UTF-8 characters alone.)
+# The C1 controls are replaced too, in their UTF-8 form: U+009B, for
+# one, is CSI, like ESC [.  (LC_ALL=C: bytes, which leaves the other
+# UTF-8 characters alone.)
 safe() {
-    local LC_ALL=C
-    printf '%s' "${1//[[:cntrl:]]/?}"
+    local LC_ALL=C t
+    t=${1//[[:cntrl:]]/?}
+    printf '%s' "${t//$'\xc2'[$'\x80'-$'\x9f']/?}"
 }
 
 safe_text() {
-    LC_ALL=C sed 's/[\x01-\x08\x0b-\x1f\x7f]/?/g'
+    LC_ALL=C sed 's/[\x01-\x08\x0b-\x1f\x7f]/?/g; s/\xc2[\x80-\x9f]/?/g'
+}
+
+# safe_lines: the NUL-separated names read, one per line, made safe.
+safe_lines() {
+    local name
+    while IFS= read -r -d '' name; do
+	safe "$name"
+	echo
+    done
 }
 
 # indent: show the lines read, made safe, indented.
@@ -389,7 +401,10 @@ cmd=()
 while [[ $# -gt 0 ]]; do
     case $1 in
 	-w|--work)
-	    work_path=$(realpath -e -- .) || die "Cannot resolve the current directory."
+	    # The "." keeps a final newline of the name: $(...) would drop it.
+	    work_path=$(realpath -e -- . && echo .) ||
+		die "Cannot resolve the current directory."
+	    work_path=${work_path%$'\n.'}
 	    shift
 	    ;;
 	--ssh)
@@ -466,10 +481,17 @@ rel_to_pwd() {
     esac
 }
 
-# glob_escape PATH: PATH as a pattern matching itself only (for find's
-# -path, -name...).
+# glob_escape VAR PATH: set VAR to PATH as a pattern matching itself
+# only (for find's -path, -name...).  (Not output: $(...) would drop a
+# final newline of the name.)
 glob_escape() {
-    printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'
+    local s=$2
+    s=${s//\\/\\\\}
+    s=${s//\*/\\*}
+    s=${s//\?/\\?}
+    s=${s//\[/\\[}
+    s=${s//\]/\\]}
+    printf -v "$1" '%s' "$s"
 }
 
 rel_to_home() {
@@ -531,9 +553,9 @@ confirm() {    # confirm QUESTION: true if the user answers yes
 # Files in $1 that the sandbox can modify, with a hard link outside $1
 # or to a read-only file in it ($ro_paths): writing through the first
 # name changes the others.  Files whose names in $1 are all read-only
-# aren't reported.
+# aren't reported.  One per line, made safe.
 outside_hardlinks() {
-    awk 'BEGIN { RS = "\0" }
+    awk 'BEGIN { RS = "\0"; ORS = "\0" }
          # Record read-only `realpath`s
          FILENAME == ARGV[1] { if ($0 != "") ro[++nro] = $0; next }
          # Format: DEVICE:INODE NLINKS PATH
@@ -549,7 +571,8 @@ outside_hardlinks() {
                    else if (w[k] > 0 && (k in r))
                        print p[k] "  (same file as read-only " r[k] ")" }' \
     <([ ${#ro_paths[@]} -eq 0 ] || printf '%s\0' "${ro_paths[@]}") \
-    <(find "$1" \( "${hidden[@]}" \) -prune -o -type f -links +1 -printf '%D:%i %n %p\0')
+    <(find "$1" \( "${hidden[@]}" \) -prune -o -type f -links +1 -printf '%D:%i %n %p\0') |
+	safe_lines
 }
 
 # File systems mounted inside $1 (bwrap binds recursively).
@@ -560,20 +583,22 @@ inner_mounts() {
     done
 }
 
-# Unix sockets or named pipes in $1.  They work across namespaces: the
-# sandbox could talk to the host program listening on one, bypassing
-# the firewall.
+# Unix sockets or named pipes in $1, one per line, made safe.  They
+# work across namespaces: the sandbox could talk to the host program
+# listening on one, bypassing the firewall.
 inner_sockets() {
-    find "$1" \( "${hidden[@]}" \) -prune -o \( -type s -o -type p \) -print
+    find "$1" \( "${hidden[@]}" \) -prune -o \( -type s -o -type p \) -print0 |
+	safe_lines
 }
 
 # Symlinks in $1 resolving outside it, as NUL-separated "link → target".
 outside_symlinks() {
-    local f
+    local f target
     while IFS= read -r -d '' f; do
 	case $(realpath -m -- "$f") in
 	    "$1"|"$1"/*) ;;
-	    *) printf '%s → %s\0' "$(rel_to_pwd "$f")" "$(safe "$(readlink -- "$f")")" ;;
+	    *)  target=$(readlink -- "$f" && echo .)
+		printf '%s → %s\0' "$(rel_to_pwd "$f")" "$(safe "${target%$'\n.'}")" ;;
 	esac
     done < <(find "$1" \( "${hidden[@]}" \) -prune -o -type l -print0)
 }
@@ -822,7 +847,9 @@ summarize_home() {
     local -a parts
     while IFS= read -r -d '' entry; do
 	path=${entry#? }
-	path=${path//[[:cntrl:]]/?}     # from the agent: made safe
+	# From the agent: made safe, like safe does.
+	path=${path//[[:cntrl:]]/?}
+	path=${path//$'\xc2'[$'\x80'-$'\x9f']/?}
 	if home_match "$path" "${HOME_TRIGGERS[@]}"; then
 	    trig=1
 	elif home_match "$path" "${HOME_IGNORE[@]}"; then
@@ -1113,7 +1140,7 @@ protect_read_only() {
 	skip+=(-o -name "$n")
     done
     # find's -path takes a pattern: escape the work dir's own path.
-    dir_glob=$(glob_escape "$dir")
+    glob_escape dir_glob "$dir"
 
     for pat; do
 	case $pat in
@@ -1187,7 +1214,9 @@ register_project() {
     local dir=$1 f other
     for f in "$PROJECTS"/*/path; do
 	[ -f "$f" ] || continue
-	other=$(<"$f")
+	# Not $(<...): it would drop a final newline of the name.
+	IFS= read -r -d '' other <"$f"
+	other=${other%$'\n'}
 	[ "$other" = "$dir" ] && continue
 	case $dir/ in "$other"/*)
 	    die "$dir is inside the project $other: work there, or delete ${f%/path}." ;;
@@ -1292,7 +1321,9 @@ lock_work_path() {
 	    rm -f -- "$f"          # nobody holds it: a finished session
 	    continue
 	fi
-	other=$(<"$f")
+	# Not $(<...): it would drop a final newline of the name.
+	IFS= read -r -d '' other <"$f"
+	other=${other%$'\n'}
 	[ "$other" = "$dir" ] && die "A session is running in $dir."
 	case $dir/ in "$other"/*)
 	    die "Another session works in $other, which contains $dir." ;;
@@ -1326,14 +1357,19 @@ lock_home() {
     fi
 }
 
-# find_project DIR: the project containing DIR (a `realpath`), if any.
+# find_project: set $dir to the project containing the current
+# directory, if any.  (Not output: $(...) would drop a final newline of
+# its name.)
 find_project() {
-    local d=$1
+    local d
+    d=$(realpath -e -- . && echo .) || return 1
+    d=${d%$'\n.'}
     while [ ! -f "$(project_dir "$d")/path" ]; do
 	[ "$d" = / ] && return 1
-	d=$(dirname -- "$d")
+	d=${d%/*}
+	d=${d:-/}
     done
-    printf '%s' "$d"
+    dir=$d
 }
 
 # show_home_layer LAYER: sum up the changes in LAYER, a project's layer
@@ -1362,7 +1398,7 @@ show_status() {
     if [ $# -gt 0 ]; then
 	dir=$1
     else
-	dir=$(find_project "$(realpath -e -- .)") ||
+	find_project ||
 	    die "No project here: ai -w makes the current directory one."
     fi
     project=$(project_dir "$dir")
@@ -1447,8 +1483,9 @@ show_status() {
     done
 }
 
-# agent_file PATH: PATH, a file of the agent's home (~/.bashrc, .bashrc),
-# relative to the home.
+# agent_file PATH: set $rel to PATH, a file of the agent's home
+# (~/.bashrc, .bashrc), relative to the home.  (Not output: $(...)
+# would drop a final newline of the name.)
 agent_file() {
     local p=$1
     case $p in
@@ -1460,7 +1497,7 @@ agent_file() {
     p=${p%/}
     [[ -n $p && $p != . && /$p/ != */../* ]] ||
 	die "Not a file of the agent's home: $1"
-    printf '%s' "$p"
+    rel=$p
 }
 
 # under DIR PATH: true if PATH, its symlinks resolved, is DIR (a
@@ -1512,7 +1549,7 @@ promote() {
     local dir project layer base p rel src f t old
     local -a ops=()
     lock_home exclusive
-    dir=$(find_project "$(realpath -e -- .)") ||
+    find_project ||
 	die "No project here: run ai --promote in the project."
     project=$(project_dir "$dir")
     layer=$(realpath -e -- "$project/home" 2>/dev/null) ||
@@ -1520,7 +1557,7 @@ promote() {
     base=$(realpath -e -- "$AIHOME") || exit 1
 
     for p; do
-	rel=$(agent_file "$p") || exit 1
+	agent_file "$p"
 	src="$layer/$rel"
 	[ -e "$src" ] || [ -L "$src" ] ||
 	    die "~/$rel has no changes in this project (see ai --status)."
@@ -1550,9 +1587,10 @@ promote() {
 	rel=${f#"$layer"/}
 	t="$base/$rel"
 	if is_whiteout "$f"; then
-	    echo "Delete ~/$rel"
+	    echo "Delete ~/$(safe "$rel")"
 	elif [ -L "$f" ]; then
-	    echo "Symlink ~/$rel → $(readlink -- "$f")"
+	    old=$(readlink -- "$f" && echo .)
+	    echo "Symlink ~/$(safe "$rel") → $(safe "${old%$'\n.'}")"
 	else
 	    old=/dev/null
 	    [ -f "$t" ] && [ ! -L "$t" ] && old=$t
@@ -1588,7 +1626,7 @@ remove_tree() {
 # showing it and asking: the project then sees the base home as it is.
 reset_home() {
     local dir project
-    dir=$(find_project "$(realpath -e -- .)") ||
+    find_project ||
 	die "No project here: run ai --reset in the project."
     project=$(project_dir "$dir")
     [ -e "$project/home" ] ||
@@ -1610,11 +1648,12 @@ forget() {
     local -a repos
     if [ $# -gt 0 ]; then
 	# -m: the directory may be gone.
-	dir=$(realpath -m -- "$1") || exit 1
+	dir=$(realpath -m -- "$1" && echo .) || exit 1
+	dir=${dir%$'\n.'}
 	[ -f "$(project_dir "$dir")/path" ] ||
 	    die "$1 is not a project (see ai --list)."
     else
-	dir=$(find_project "$(realpath -e -- .)") ||
+	find_project ||
 	    die "No project here: run ai --forget in the project, or give its directory."
     fi
     project=$(project_dir "$dir")
@@ -1661,7 +1700,8 @@ list_projects() {
     local -a names=() rows=()
     for f in "$PROJECTS"/*/path; do
 	[ -f "$f" ] || continue
-	dir=$(<"$f")
+	IFS= read -r -d '' dir <"$f"
+	dir=${dir%$'\n'}
 	lock=$(session_lock "$dir")
 	if [ ! -d "$dir" ]; then
 	    state="gone: ai --forget $(rel_to_home "$dir")"
@@ -2014,7 +2054,8 @@ if [ -n "$work_path" ]; then
     # The checks on what the sandbox will see of the work dir: after
     # protect_tool_files, which says what it replaces.
     for p in "${shadowed[@]}"; do
-	hidden+=(-o -path "$(glob_escape "$p")")
+	glob_escape p "$p"
+	hidden+=(-o -path "$p")
     done
     links=$(outside_hardlinks "$work_path")
     if [ -n "$links" ]; then

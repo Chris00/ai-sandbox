@@ -8,37 +8,27 @@ characters replaced.
 import os
 import unittest
 
-from harness import AiTestCase, expand_names, for_each_name, known_bug, q
+from harness import AiTestCase, expand_names, for_each_name, q
 
 SETTLE = "sleep 0.3"
 MOUNT = "/work/software/proj"
 
-# The causes of the known bugs below.
-C1 = ("safe and safe_text work on bytes, with LC_ALL=C: the UTF-8 form of the C1 "
-      "controls (U+009B is CSI, like ESC [) reaches the terminal")
-RAW_NEWLINE = "the path is shown as it is: safe_text keeps newlines, so a name can make lines"
-STRIPPED = "$(...) removes trailing newlines: this is another path, or another name"
-
-
-def c1(**others):
-    return dict(c1_csi=C1, **others)
-
 
 @expand_names
 class ExitReport(AiTestCase):
-    @for_each_name(c1())
+    @for_each_name()
     def test_new_symlink(self, name):
         r = self.ai("-w", session=f'ln -s /etc/passwd "$WORK"/{q(name)}')
         self.assertShown(r.err, f"./{name} → /etc/passwd")
         self.assertSafe(r.err)
 
-    @for_each_name(c1(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_symlink_target(self, name):
         r = self.ai("-w", session=f'ln -s /x/{q(name)} "$WORK/link"')
         self.assertShown(r.err, f"./link → /x/{name}")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_new_tool_file_in_a_directory(self, name):
         d = self.work / name
         d.mkdir()
@@ -46,7 +36,7 @@ class ExitReport(AiTestCase):
         self.assertShown(r.err, f"{self.work}/{name}/.envrc")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_new_tool_file_in_a_new_directory(self, name):
         r = self.ai("-w", session=f'mkdir "$WORK"/{q(name)}; touch "$WORK"/{q(name)}/.npmrc')
         self.assertShown(r.err, f"{self.work}/{name}/.npmrc")
@@ -64,7 +54,7 @@ class ExitReport(AiTestCase):
         r = self.ai("-w", session=f'git init -q "$WORK/new"; mkdir "$WORK"/{q(name)}; touch "$WORK"/{q(name)}/.npmrc')
         self.assertIn(f"{self.work}/new/.git\n", r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_the_log(self, name):
         (self.work / name).mkdir()
         self.ai("-w", session=f'touch "$WORK"/{q(name)}/.envrc')
@@ -72,25 +62,25 @@ class ExitReport(AiTestCase):
         self.assertShown(log, f"{self.work}/{name}/.envrc")
         self.assertSafe(log)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_home_change(self, name):
         r = self.ai("-w", session=f'touch "$LAYER"/{q(name)}')
         self.assertShown(r.err, f"  {name}")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_home_change_in_a_trigger_directory(self, name):
         r = self.ai("-w", session=f'mkdir -p "$LAYER/.local/bin"; touch "$LAYER/.local/bin"/{q(name)}')
         self.assertShown(r.err, f"! .local/bin/{name}")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_home_directory_name_in_a_group(self, name):
         r = self.ai("-w", session=f'd="$LAYER/.claude/skills"/{q(name)}; mkdir -p "$d"; touch "$d/a" "$d/b"')
         self.assertShown(r.err, f"! .claude/skills/{name}/ (2 files)")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_base_home_trigger(self, name):
         (self.base / ".local/bin").mkdir(parents=True)
         r = self.ai(session=f'touch "$BASE/.local/bin"/{q(name)}')
@@ -102,7 +92,7 @@ class ExitReport(AiTestCase):
 class BeforeTheSession(AiTestCase):
     """The warnings that you read to decide whether to go on."""
 
-    @for_each_name(c1(newline=RAW_NEWLINE, trailing_newline=RAW_NEWLINE))
+    @for_each_name()
     def test_hard_link(self, name):
         (self.outside / "f").write_text("x")
         os.link(self.outside / "f", self.work / name)
@@ -111,7 +101,7 @@ class BeforeTheSession(AiTestCase):
         self.assertShown(r.err, f"{self.work}/{name}")
         self.assertSafe(r.err)
 
-    @for_each_name(c1(newline=RAW_NEWLINE, trailing_newline=RAW_NEWLINE))
+    @for_each_name()
     def test_named_pipe(self, name):
         os.mkfifo(self.work / name)
         r = self.ai("-w")
@@ -119,7 +109,7 @@ class BeforeTheSession(AiTestCase):
         self.assertShown(r.err, f"{self.work}/{name}")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_tool_file_message(self, name):
         (self.work / name).mkdir()
         (self.work / name / ".envrc").write_text("x")
@@ -128,21 +118,21 @@ class BeforeTheSession(AiTestCase):
         self.assertShown(r.err, f"./{name}/.envrc")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_symlink_skipped_by_read_only(self, name):
         (self.work / name).symlink_to("/etc/passwd")
         r = self.ai("-w", "--ro", "*")
         self.assertShown(r.err, f"./{name}")
         self.assertSafe(r.err)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_new_repo(self, name):
         self.make_repo(self.work / name)
         r = self.ai("-w", answers=["n"])
         self.assertShown(r.err + r.out, f"./{name}")
         self.assertSafe(r.err + r.out)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_git_link(self, name):
         d = self.work / name
         d.mkdir()
@@ -215,7 +205,7 @@ class ProjectDirectory(AiTestCase):
         d.mkdir()
         return d
 
-    @for_each_name(dict(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_the_right_directory_is_mounted(self, name):
         d = self.project(name)
         # A decoy, for whoever mangles the name.
@@ -226,7 +216,7 @@ class ProjectDirectory(AiTestCase):
         self.assertIn(("--bind", str(d), f"/work/{name}"), r.bwrap.mounts())
         self.assertEqual((self.project_dir(d) / "path").read_bytes(), os.fsencode(f"{d}\n"))
 
-    @for_each_name(c1(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_list(self, name):
         d = self.project(name)
         self.assertOk(self.ai("-w", cwd=d))
@@ -234,7 +224,7 @@ class ProjectDirectory(AiTestCase):
         self.assertShown(r.out, f"~/{name}")
         self.assertSafe(r.out)
 
-    @for_each_name(c1(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_status(self, name):
         d = self.project(name)
         self.make_repo(d)
@@ -251,7 +241,7 @@ class ProjectDirectory(AiTestCase):
         self.assertOk(self.ai("-w", cwd=d))
         self.assertOk(self.ai("-w", cwd=d))
 
-    @for_each_name(dict(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_forget(self, name):
         d = self.project(name)
         self.make_repo(d)
@@ -262,7 +252,7 @@ class ProjectDirectory(AiTestCase):
         self.assertFalse(project.exists())
         self.assertNotIn("ai", self.git("remote", cwd=d).split())
 
-    @for_each_name(dict(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_read_only_patterns(self, name):
         d = self.project(name)
         (d / "docs").mkdir()
@@ -280,7 +270,7 @@ class ProjectDirectory(AiTestCase):
         self.assertOk(r)
         self.assertNotIn("Hard-linked", r.err)
 
-    @for_each_name(c1(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_notification_title(self, name):
         d = self.project(name)
         r = self.ai("-w", cwd=d, session=f'echo stop >"$NOTIFY"; {SETTLE}')
@@ -293,7 +283,7 @@ class ProjectDirectory(AiTestCase):
 
 @expand_names
 class Status(AiTestCase):
-    @for_each_name(c1())
+    @for_each_name()
     def test_nested_repo(self, name):
         self.make_repo(self.work / name)
         self.assertOk(self.ai("-w", answers=["y"]))
@@ -302,7 +292,7 @@ class Status(AiTestCase):
         self.assertShown(r.out, f"Repo {name}: nothing left to merge")
         self.assertSafe(r.out)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_private_copy(self, name):
         (self.work / name / "target").mkdir(parents=True)
         self.assertOk(self.ai("-w"))
@@ -310,7 +300,7 @@ class Status(AiTestCase):
         self.assertShown(r.out, f"  {name}/target: ")
         self.assertSafe(r.out)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_home_layer(self, name):
         self.assertOk(self.ai("-w", session=f'touch "$LAYER"/{q(name)}'))
         r = self.ai("--status")
@@ -328,7 +318,7 @@ class Promote(AiTestCase):
         self.assertOk(self.ai("-w"))
         self.layer().mkdir(exist_ok=True)
 
-    @for_each_name(c1(trailing_newline=STRIPPED))
+    @for_each_name()
     def test_a_file(self, name):
         (self.layer() / name).write_text("project\n")
         r = self.ai("--promote", name, answers=["y"])
@@ -337,7 +327,7 @@ class Promote(AiTestCase):
         self.assertFalse((self.layer() / name).exists())
         self.assertSafe(r.out)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_a_file_named_in_a_directory(self, name):
         (self.layer() / "d").mkdir()
         (self.layer() / "d" / name).write_text("project\n")
@@ -346,7 +336,7 @@ class Promote(AiTestCase):
         self.assertEqual((self.base / "d" / name).read_text(), "project\n")
         self.assertSafe(r.out)
 
-    @for_each_name(c1(newline=RAW_NEWLINE, trailing_newline=RAW_NEWLINE))
+    @for_each_name()
     def test_a_deletion(self, name):
         (self.layer() / "d").mkdir()
         os.mknod(self.layer() / "d" / name, 0o600 | 0o020000, 0)
@@ -354,7 +344,7 @@ class Promote(AiTestCase):
         self.assertShown(r.out, f"Delete ~/d/{name}")
         self.assertSafe(r.out)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_the_diff_labels(self, name):
         (self.layer() / "d").mkdir()
         (self.layer() / "d" / name).write_text("project\n")
@@ -363,7 +353,7 @@ class Promote(AiTestCase):
         # What you approve starts with its own two header lines.
         self.assertEqual(len([l for l in r.out.splitlines() if l.startswith(("---", "+++"))]), 2, r.out)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_a_refusal_leaves_it(self, name):
         (self.layer() / "d").mkdir()
         (self.layer() / "d" / name).write_text("project\n")
@@ -372,7 +362,7 @@ class Promote(AiTestCase):
         self.assertTrue((self.layer() / "d" / name).exists())
         self.assertSafe(r.out)
 
-    @for_each_name(c1(newline=RAW_NEWLINE, trailing_newline=RAW_NEWLINE))
+    @for_each_name()
     def test_a_symlink_target(self, name):
         (self.layer() / "link").symlink_to(f"/x/{name}")
         r = self.ai("--promote", "link", answers=["n"])
@@ -382,7 +372,7 @@ class Promote(AiTestCase):
 
 @expand_names
 class LiveNotifications(AiTestCase):
-    @for_each_name(c1())
+    @for_each_name()
     def test_tool_file_in_a_directory(self, name):
         (self.work / name).mkdir()
         r = self.ai("-w", session=f'touch "$WORK"/{q(name)}/.envrc; {SETTLE}')
@@ -391,13 +381,13 @@ class LiveNotifications(AiTestCase):
         self.assertIn(".envrc was just created", body)
         self.assertSafe(body)
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_tool_file_in_a_new_directory(self, name):
         r = self.ai("-w", session=f'mkdir "$WORK"/{q(name)}; touch "$WORK"/{q(name)}/.envrc; {SETTLE}')
         self.assertEqual(len(r.notifications), 1, r.notifications)
         self.assertSafe(r.notifications[0][-1])
 
-    @for_each_name(c1())
+    @for_each_name()
     def test_the_log_stays_one_line_per_entry(self, name):
         (self.work / name).mkdir()
         self.ai("-w", session=f'touch "$WORK"/{q(name)}/.envrc; {SETTLE}')
