@@ -646,7 +646,7 @@ def valid_utf8(text):
     return text.encode(**ENCODING).decode("utf-8", "ignore")
 
 
-def find_icon(cfg, name, fallback):
+def find_icon(name, fallback):
     """The icon `name` of the notifications, in the repo next to the
     script or installed in your icon theme; otherwise the theme's icon
     `fallback`."""
@@ -659,8 +659,11 @@ def find_icon(cfg, name, fallback):
 
 
 def notify(*args):
-    if shutil.which("notify-send"):
+    """Show a desktop notification, if possible: the reports don't need it."""
+    try:
         subprocess.run(["notify-send", *args], stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
 
 
 def project_dir(cfg, path):
@@ -1107,9 +1110,10 @@ def protect_tool_files(cfg, work, args):
     wherever it points in the sandbox."""
     path, mount = work.path, work.mount
     shadow_base = f"{work.project}/shadow"
-    found = find(path, "-mindepth", "1", "-name", ".git", "-prune", "-o",
-                 "(", *name_tests([*cfg.PRIVATE, *cfg.READONLY]), ")",
-                 "(", "-type", "d", "-o", "-type", "f", ")", "-prune", "-print0")
+    names = name_tests([*cfg.PRIVATE, *cfg.READONLY])
+    found = names and find(path, "-mindepth", "1", "-name", ".git", "-prune", "-o",
+                           "(", *names, ")",
+                           "(", "-type", "d", "-o", "-type", "f", ")", "-prune", "-print0")
     # PRIVATE entries the project's tools would create at the top.
     for name, signal_file in cfg.PRIVATE_IF.items():
         p = f"{path}/{name}"
@@ -1310,7 +1314,7 @@ class Session:
         except OSError:
             pass
         notify("-a", "ai", "-u", "critical", "-i",
-               find_icon(cfg, "ai-sandbox-warning", "dialog-warning"),
+               find_icon("ai-sandbox-warning", "dialog-warning"),
                f"ai: new {os.path.basename(shown)}",
                valid_utf8(f"{markup(where)} was just created, by you or the agent. "
                           "Review it before using the project on your machine."))
@@ -1328,8 +1332,11 @@ class Session:
                 if "ISDIR" in kind:
                     # A new directory, or one moved in: inotifywait only watches
                     # it once it exists, so what is created in it before is missed.
-                    found += find(path, "-mindepth", "1", "(", *cfg.trigger_expr, ")",
-                                  "-prune", "-print0", quiet=True)
+                    try:
+                        found += find(path, "-mindepth", "1", "(", *cfg.trigger_expr, ")",
+                                      "-prune", "-print0", quiet=True)
+                    except OSError:
+                        pass            # the report at exit still covers it
                 for p in found:
                     if p not in seen:
                         seen.add(p)
@@ -1375,7 +1382,7 @@ class Session:
         is read as another one."""
         cfg, last = self.cfg, {}
         name = valid_utf8(safe(name))   # a title: not markup
-        icon = find_icon(cfg, "ai-sandbox", "dialog-information")
+        icon = find_icon("ai-sandbox", "dialog-information")
         data = b""
         while chunk := os.read(fd, 4096):
             data += chunk
@@ -1970,8 +1977,9 @@ def show_status(cfg, path=None):
 
     # The private copies: at their path in the project, within shadow/.
     shadow = f"{project}/shadow"
-    copies = find(shadow, "-mindepth", "1", "(", *name_tests(cfg.PRIVATE), ")",
-                  "-type", "d", "-prune", "-print0", quiet=True)
+    names = name_tests(cfg.PRIVATE)
+    copies = names and find(shadow, "-mindepth", "1", "(", *names, ")",
+                            "-type", "d", "-prune", "-print0", quiet=True)
     if copies:
         print("Private copies:")
     for p in sorted(copies, key=os.fsencode):

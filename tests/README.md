@@ -30,6 +30,9 @@ fake notify-send keeps your desktop quiet.
 | `test_projects.py` | `--status`, `--list`, `--promote`, `--reset`, `--forget` |
 | `test_names.py` | hostile names, everywhere names are handled or shown |
 | `test_real_sandbox.py` | what the agent really can do in a session (on the host) |
+| `test_session_end.py` | signals, colours on a terminal, mounts in the work dir, locales |
+| `test_python.py` | what is specific to Python: the configuration, the interpreter |
+| `test_reference.py` | the Python version against the bash one |
 | `test_harness.py` | the fake sandbox itself |
 
 `ai` runs on a terminal of its own, under `session_leader.py`, which
@@ -60,24 +63,19 @@ cause, or listed with `for_each_name(known...)`.  The suite stays green
 (they count as "expected failures") and turns red when the bug is fixed
 ("unexpected success"), so that the mark gets removed.
 
-## Porting `ai` to another language
+## The bash version
 
-Set `AI_TEST_PROGRAM` to the new program.  Two things depend on the
-implementation:
+`ai.bash` is the version `ai` was ported from, kept as a reference.  The
+suite passes on both, except for what is about the configuration's
+language or a fix (see `IS_BASH`):
 
-- `AiTestCase.write_config` in `harness.py`, and the tests that give it
-  lines of configuration, are in bash;
-- `stubs/python3` recognizes `JOIN_NS` by its text.
+```sh
+AI_TEST_PROGRAM=ai.bash tests/run.py
+```
 
-Messages are compared as they are: a rewrite should keep them, or change
-the tests knowingly.
+`test_reference.py` runs the same scenarios through both, in the same
+paths, and compares what they do, byte for byte: exit status, output,
+log, notifications, the arguments of bwrap and the seccomp filter.  Only
+the temporary directory, the dates and the process IDs may differ.
 
-`seccomp.bpf`, in a run's log directory, holds the filter bwrap got: the
-one of a rewrite can be compared byte by byte with the original's.
-
-## Not covered
-
-- `migrate_old_layout`: to be removed anyway.
-- File systems mounted inside the work dir, which need privileges.
-- The desktop notifications' look, the colours on a terminal, signals
-  other than SIGKILL.
+`stubs/python3` recognizes `JOIN_NS` by its text.

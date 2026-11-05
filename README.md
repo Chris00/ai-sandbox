@@ -97,10 +97,10 @@ The script also checks the host side, before and after each session:
 - `~/AI` on a file system with user extended attributes, which
   overlayfs needs (ext4, Btrfs, XFS… but not NFS)
 - [slirp4netns](https://github.com/rootless-containers/slirp4netns)
-- util-linux (`findmnt`, `flock`)
+- util-linux (`findmnt`)
 - `nftables` (`nft`), with the `nf_tables` kernel module loaded
-- GNU coreutils and findutils, `awk`, Git
-- Python ≥ 3.12 (`os.setns`), with libseccomp's bindings
+- GNU coreutils and findutils, Git
+- Python ≥ 3.12 as `/usr/bin/python3` (`os.setns`), with libseccomp's bindings
   (`python3-seccomp` on Debian and Ubuntu, `libseccomp-python` on
   Fedora)
 - for `--ssh`: OpenSSH ≥ 8.9 (destination-restricted keys)
@@ -181,7 +181,7 @@ on inotify watches; `ai` then says so. Raise it with, for example,
    ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_ai -C ai-agent
    ```
 
-   Then set `AI_SSH_HOSTS` in `~/AI/config` (see
+   Then set `AI_SSH_HOSTS` in `~/AI/config.py` (see
    [Configuration](#configuration)) to the hosts the agent may use it
    on, and connect once to each of them from your
    normal session so that they are in your `~/.ssh/known_hosts`.
@@ -717,44 +717,51 @@ Without a systemd user session, `ai` runs without limits and says so.
 
 ## Configuration
 
-`ai` reads `~/AI/config`, if it exists: a bash file, sourced after the
-defaults set at the top of the script. Since it runs with your rights,
-it must be yours and writable by you only. Make it readable by you
-only too if it holds secrets:
+`ai` reads `~/AI/config.py`, if it exists: Python code, run after the
+defaults are set (in `default_settings`, at the top of the script), with
+these settings as variables, and `HOME`. Since it runs with your rights,
+it must be yours and writable by you only. Make it readable by you only
+too if it holds secrets:
 
-```bash
-# ~/AI/config (chmod 600)
+```python
+# ~/AI/config.py (chmod 600)
 
 # Environment variables, as NAME=value: AI_ENV for every session,
 # AI_PROJECT_ENV for project sessions (-w) only.
-AI_ENV=(
-    CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…    # from claude setup-token
-)
-AI_PROJECT_ENV+=(
+AI_ENV = [
+    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…",    # from claude setup-token
+]
+AI_PROJECT_ENV += [
     # Add the equivalent of DISABLE_AUTOUPDATER for another agent.
-)
+]
 
-HOME_TRIGGERS+=(.config/myagent)     # see The agent's home
-HOME_IGNORE+=(.local/state/myagent)
-READONLY+=(.myrc)                    # see Tool files
-PRIVATE+=(_build)
-PRIVATE_IF[_build]=dune-project
-HOME_GROUPS+=(".config/myagent/*")
-AI_SSH_HOSTS=(github.com)            # replaces the default list
-FORBID_WORK+=("$HOME/Documents/taxes")
+HOME_TRIGGERS += [".config/myagent"]     # see The agent's home
+HOME_IGNORE += [".local/state/myagent"]
+READONLY += [".myrc"]                    # see Tool files
+PRIVATE += ["_build"]
+PRIVATE_IF["_build"] = "dune-project"
+HOME_GROUPS += [".config/myagent/*"]
+AI_SSH_HOSTS = ["github.com"]            # replaces the default list
+FORBID_WORK += [f"{HOME}/Documents/taxes"]
 ```
 
-Use `+=` to add to a list: `=` replaces it, defaults included. Other
-variables set at the top of the script can be changed the same way.
+Use `+=` to add to a list: `=` replaces it, defaults included. The other
+settings of `default_settings` can be changed the same way. A setting of
+the wrong type, or an error in the file, stops `ai` with the line
+concerned.
 The sandbox's environment is cleared, except for a few variables set by
 `ai` (`HOME`, `PATH`, `TERM`…); the variables of `AI_ENV` and
 `AI_PROJECT_ENV` come after them, so they can replace them. `ai` passes
-them to bwrap through a pipe rather than on its command line, which
-every local user can read with `ps`.
+them to bwrap through a file in memory rather than on its command line,
+which every local user can read with `ps`.
 
 The resource limits (see [Resource limits](#resource-limits)) can be
-set there too. Write them `: "${AI_CPUS:=4}"`, so that the environment
-still takes precedence (`AI_CPUS=2 ai -w`).
+set there too. Write them `AI_CPUS = AI_CPUS or 4`, so that the
+environment still takes precedence (`AI_CPUS=2 ai -w`).
+
+An older `~/AI/config`, in bash, is no longer read: `ai` refuses to
+start while it is there without a `~/AI/config.py`, as going on would
+drop what it asks. Write its settings in Python, then delete it.
 
 
 ## Files
@@ -763,13 +770,13 @@ still takes precedence (`AI_CPUS=2 ai -w`).
 |----------------------|--------------------------------------------------|
 | `~/AI/home`          | the agent's home directory                       |
 | `~/AI/projects/`     | one directory per project (see below)            |
-| `~/AI/config`        | your configuration, optional (see [Configuration](#configuration)) |
+| `~/AI/config.py`     | your configuration, optional (see [Configuration](#configuration)) |
 | `~/AI/locks`         | the locks of the running sessions                |
 | `~/AI/warnings.log`  | warnings from the checks during the session and at exit, with their time |
 | `~/.ssh/id_ed25519_ai` | the agent's SSH key (`--ssh`)                  |
 
 The paths are set at the top of the script, and can be changed in
-`~/AI/config`.
+`~/AI/config.py`.
 
 A project's directory is named after the project's path, escaped by
 `systemd-escape` so that two projects never nest (`~/software/proj`

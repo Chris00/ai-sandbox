@@ -22,7 +22,8 @@ from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
 STUBS = TESTS / "stubs"
-AI = Path(os.environ.get("AI_TEST_PROGRAM", TESTS.parent / "ai")).resolve()
+# Relative to the top of the repository, wherever the tests run.
+AI = (TESTS.parent / os.environ.get("AI_TEST_PROGRAM", "ai")).resolve()
 # The bash version, kept as a reference, reads a configuration in bash.
 IS_BASH = AI.read_bytes().startswith(b"#!/bin/bash")
 SHOW_KNOWN_BUGS = bool(os.environ.get("AI_TEST_SHOW_KNOWN_BUGS"))
