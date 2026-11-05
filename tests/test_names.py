@@ -8,7 +8,7 @@ characters replaced.
 import os
 import unittest
 
-from harness import AiTestCase, expand_names, for_each_name, q
+from harness import IS_BASH, AiTestCase, expand_names, for_each_name, q
 
 SETTLE = "sleep 0.3"
 MOUNT = "/work/software/proj"
@@ -399,6 +399,12 @@ class LiveNotifications(AiTestCase):
 
 class Evasion(AiTestCase):
     """A name chosen to defeat the reports, not just to look odd."""
+
+    @unittest.skipIf(IS_BASH, "bash compares what is shown of the links")
+    def test_a_new_link_cannot_hide_behind_one_that_looks_the_same(self):
+        os.symlink("/etc/passwd", self.work / "a\nb")
+        r = self.ai("-w", session=f'ln -s /etc/passwd "$WORK"/{q("a" + chr(9) + "b")}')
+        self.assertIn("New symlinks out of the work dir", r.err)
 
     def test_a_name_sorted_first_cannot_hide_the_tool_files(self):
         # "!" sorts before about any name, and an invalid byte makes the path

@@ -332,7 +332,7 @@ class AiTestCase(unittest.TestCase):
         env.update(extra or {})
         return {k: v for k, v in env.items() if v is not None}
 
-    def start(self, *args, cwd=None, answers=(), session=None, env=None):
+    def start(self, *args, cwd=None, answers=(), session=None, env=None, program=AI):
         """Start `ai ARGS` on a terminal of its own.
 
         `answers` are typed at its questions; there is an end of file
@@ -361,7 +361,7 @@ class AiTestCase(unittest.TestCase):
         with open(out, "wb") as o, open(err, "wb") as e:
             leader = subprocess.Popen(
                 [sys.executable, "-I", str(TESTS / "session_leader.py"),
-                 str(status_w), str(release_r), str(AI), *map(str, args)],
+                 str(status_w), str(release_r), str(program), *map(str, args)],
                 cwd=os.fsencode(str(cwd if cwd is not None else self.work)),
                 env=environ, stdin=slave, stdout=o, stderr=e,
                 pass_fds=(status_w, release_r),

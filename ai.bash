@@ -1,0 +1,2247 @@
+#!/bin/bash
+#
+# ai — run a shell (or a command) for an AI agent inside a bubblewrap
+# sandbox.
+#
+# Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
+#        ai --status
+#        ai --promote PATH...
+#        ai --reset | --forget [DIR] | --list
+#
+# Without COMMAND, run an interactive shell.  Without -w, the sandbox
+# starts in the agent's home, e.g. to install tools: its changes there
+# are seen by every project.
+#
+# With -w, the current directory is the work directory, or project: it
+# is mounted read-write at /work/PATH, where PATH is its path relative
+# to your home (/work-tmp/DIR for a directory DIR outside your home),
+# so that tools keeping per-directory data (history, memory...) tell
+# your projects apart.  Everything ai keeps for a project is in one
+# directory of $PROJECTS (see project_dir).  The real ".git" directory
+# of every Git repo in it is hidden: the sandbox sees a clone kept
+# there instead, so the AI cannot alter your history, config or hooks.
+# Your real repo is visible read-only under /upstream, so "git fetch
+# origin" inside the sandbox picks up your latest commits.  To bring
+# the AI's commits back, in your real repo:
+#
+#     git fetch ai
+#     git diff ai/main        # review; empty when the files match
+#     git reset ai/main       # move the branch, keep the files
+#
+# From the host, only ever *fetch from* the copies.  Never push into
+# them or run Git commands inside them: their configuration and hooks
+# are under the AI's control.
+#
+# In a project, the agent's home is an overlay: the base home ($AIHOME)
+# read-only, and the project's own changes on top, kept in its
+# directory.  What the agent leaves in its home (history, memory,
+# settings...) thus stays in the project.  AI_PROJECT, set to the work
+# dir's path in the sandbox, tells the base home's files (.bashrc...)
+# that they run in a project.
+#
+# The agent's hooks can report that it has finished or needs you, by
+# writing a word to the pipe $AI_NOTIFY: ai then shows a desktop
+# notification (see watch_agent_events and docs/notifications.md).
+#
+# --ro PATTERN... (or --read-only) makes what matches the PATTERNs, up
+# to the next option or "--", read-only in the sandbox.  Without a "/",
+# a PATTERN matches names anywhere in the work dir (e.g. '*.pdf'); with
+# one, paths relative to it (e.g. 'data/raw', 'docs/*.pdf', where "*"
+# also matches "/"); "." is the whole work dir.  An unquoted glob,
+# expanded by your shell, only gives what is in the current directory
+# itself: quote it to reach subdirectories.
+#
+# --status shows what ai keeps for the project containing the current
+# directory: the agent's branches with commits not in yours, the
+# private copies and whether a session is running.
+#
+# --promote PATH... makes the project's version of files of the agent's
+# home the base version, for every project.  --reset deletes the
+# project's changes to the agent's home, --forget everything ai keeps
+# for the project (of DIR, if given, even if it no longer exists).
+# --list shows all the projects.
+
+# The base $HOME/AI is protected below.
+AIHOME="$HOME/AI/home"
+# One directory per project, named after the project's path.  It holds:
+#   path    the project's path;
+#   git/    the clones of its Git repos, at their path in the project;
+#   shadow/ the private copies of its $PRIVATE directories;
+#   home/   its changes to the agent's home (the overlay's upper layer);
+#   home.work/  the overlay's work directory.
+PROJECTS="$HOME/AI/projects"
+AI_SSH_KEY="$HOME/.ssh/id_ed25519_ai"
+# The sandbox itself; changeable in the configuration for the tests,
+# which replace it (see tests/README.md).
+BWRAP=/usr/bin/bwrap
+
+# Firewall of the sandbox's network: no access to the local network.
+# 10.0.2.3 is slirp4netns's DNS forwarder; the rest of 10.0.0.0/8,
+# including the host behind 10.0.2.2, is blocked.
+NFT_RULES='
+table inet ai {
+    chain output {
+	type filter hook output priority 0; policy accept;
+	ip daddr 10.0.2.3 meta l4proto { tcp, udp } th dport 53 accept
+	ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16,
+		   172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4,
+		   240.0.0.0/4 } reject
+	ip6 daddr { fc00::/7, fe80::/10, ff00::/8 } reject
+    }
+}'
+
+LOCKDIR="$HOME/AI/locks"
+# The warnings of the checks, with their time.
+AI_LOG="$HOME/AI/warnings.log"
+
+# Directories never exposed: no work dir may be one of them, be in one
+# or contain one.  Besides these, ai refuses /, your whole home, its
+# hidden directories, and ai's own files: $AIHOME, $PROJECTS... and the
+# agent's SSH key.
+FORBID_WORK=("$HOME/Personal")
+
+# Files and directories in the work dir that make tools on the host run
+# code, often just by entering the directory, opening it in an editor
+# or building the project.  In the sandbox:
+#
+# - the PRIVATE ones (build output, environments) are replaced by a
+#   private copy kept in the project's directory: the agent builds
+#   there, and yours stay untouched;
+PRIVATE=(
+    target                              # Cargo: binaries, proc macros...
+    .venv venv                          # Python: activating runs their scripts
+    node_modules                        # npm, Yarn, pnpm
+    .direnv                             # direnv
+)
+# - the READONLY ones (configuration) are read-only: the agent sees your
+#   settings but can't change them.
+READONLY=(
+    .envrc                              # direnv
+    .dir-locals.el .dir-locals-2.el     # Emacs
+    .vscode .idea .devcontainer         # editors and IDEs
+    .npmrc .yarnrc .yarnrc.yml .pnpmfile.cjs  # npm, Yarn, pnpm
+    .cargo                              # Cargo (runners, wrappers)
+    .mise.toml mise.toml .tool-versions # mise, asdf
+    .husky .pre-commit-config.yaml      # Git hooks kept in the tree
+    .gitmodules .gitattributes
+)
+# Only existing entries can be protected, except for the PRIVATE ones
+# below, created at the top of the work dir by the tool that the file
+# on the right signals.
+declare -A PRIVATE_IF=(
+    [target]=Cargo.toml
+    [.venv]=pyproject.toml
+    [node_modules]=package.json
+    [.direnv]=.envrc
+)
+# Files of the agent's home that make code run, or steer the agent, in
+# its later sessions: changes to them during a session are reported at
+# exit.
+#
+# Patterns: Paths are relative to the home; "*" matches any
+# characters, including "/", and a directory covers what it contains.
+HOME_TRIGGERS=(
+    .profile .bashrc .bash_profile .bash_login .bash_logout .inputrc
+    .zshenv .zprofile .zshrc .zlogin .config/fish
+    .local/bin                          # on the PATH
+    .gitconfig .config/git              # aliases, hooks, helpers
+    .ssh/config .ssh/rc                 # ProxyCommand, LocalCommand
+    .npmrc .config/pip .pip .cargo/config .cargo/config.toml
+    # Claude Code: hooks, permissions, instructions and its own program.
+    .claude/settings.json .claude/settings.local.json .claude/CLAUDE.md
+    .claude/hooks .claude/commands .claude/agents .claude/skills
+    .claude/plugins .claude/projects/*/memory .local/share/claude
+    # Other agents' settings, with their hooks.
+    .codex/config.toml .copilot/hooks .copilot/settings.json
+    .kimi/config.toml
+)
+
+# Files of the agent's home that change in about every session, and
+# that the reports leave out (unless they are also $HOME_TRIGGERS):
+# histories, caches, the agents' own state.  Patterns as above.
+HOME_IGNORE=(
+    .bash_history .zsh_history .python_history .node_repl_history
+    .lesshst .viminfo .wget-hsts .sqlite_history
+    .cache
+    # Claude Code: its state (~/.claude.json, rewritten at every start,
+    # though it also holds the MCP servers), transcripts, to-do lists...
+    .claude/daemon.lock .claude/daemon.log .claude/daemon.status.json
+    .claude.json .claude.json.backup .claude/projects/*.jsonl
+    .claude/file-history .claude/.last-cleanup .claude/paste-cache
+    .claude/todos .claude/shell-snapshots .claude/statsig
+    .claude/backups .claude/cache .claude/history.jsonl
+    .npm                                # npm's cache
+)
+
+# How the summaries of the changes to the agent's home (at exit, and
+# in ai --status) show them: first what matches these patterns, in this
+# order, a directory as one entry with the number of files changed in
+# it (what an installation puts there belongs together), then the rest,
+# two levels down.  A file goes with the first pattern that matches it
+# or one of its directories, the shortest.  Patterns as above; one
+# naming a file only puts it first.
+HOME_GROUPS=(
+    .claude/.credentials.json           # Claude Code: your login, to promote?
+    .claude/settings.json
+    .claude/skills/synced/*             # a skill from claude.ai, before...
+    .claude/skills/*                    # ...any other skill
+    .claude/plugins/cache/*/*           # a plugin (cache/MARKETPLACE/PLUGIN)
+    .claude/plugins/marketplaces/*      # a marketplace
+    .claude/projects/*/memory           # a project's memory
+    .local/share/claude/versions        # Claude Code's versions
+)
+
+# List of destination constraints of the form ‘[user@]dest-hostname’
+# for the $AI_SSH_KEY.  An empty list means that it is unrestricted
+# (it can be used anywhere it's accepted).
+AI_SSH_HOSTS=(github.com gitlab.com)
+
+# Environment variables of the sandbox, as NAME=value, besides the few
+# that ai sets (the environment is cleared, and these come last, so they
+# can replace them): AI_ENV in every session, AI_PROJECT_ENV in project
+# sessions only.  They reach bwrap through a pipe, not on its command
+# line, which every local user can read: they may hold secrets.
+AI_ENV=()
+AI_PROJECT_ENV=(
+    # Agents: update in the base home (ai without -w), for all projects.
+    # An update in a project would only land in its layer of the home:
+    # a copy of the whole program.
+    DISABLE_AUTOUPDATER=1               # Claude Code
+    COPILOT_AUTO_UPDATE=false           # GitHub Copilot CLI
+)
+
+# The events an agent may report, from its hooks, by writing one of
+# these words to the pipe $AI_NOTIFY (see docs/notifications.md), and
+# what the desktop notification then says.  Nothing else is accepted:
+# the sandbox chooses the event, never the text.
+declare -A AGENT_EVENTS=(
+    [stop]="has finished"
+    [permission_prompt]="asks for your permission"
+    [idle_prompt]="is waiting for you"
+    [elicitation_dialog]="has a question"
+    [input]="needs your attention"
+)
+
+# Your configuration: a bash file, sourced after the defaults above,
+# which it can change (with "+=" to add to a list).
+AI_CONFIG="$HOME/AI/config"
+
+# safe STRING, safe_text: STRING, or the text read, with the control
+# characters, which could drive your terminal, replaced by "?"; but
+# safe_text keeps tabs and newlines.  For what may come from the agent:
+# the names of files in the work dir, for one, so for every path shown.
+# The C1 controls are replaced too, in their UTF-8 form: U+009B, for
+# one, is CSI, like ESC [.  (LC_ALL=C: bytes, which leaves the other
+# UTF-8 characters alone.)
+safe() {
+    local LC_ALL=C t
+    t=${1//[[:cntrl:]]/?}
+    printf '%s' "${t//$'\xc2'[$'\x80'-$'\x9f']/?}"
+}
+
+safe_text() {
+    LC_ALL=C sed 's/[\x01-\x08\x0b-\x1f\x7f]/?/g; s/\xc2[\x80-\x9f]/?/g'
+}
+
+# safe_lines: the NUL-separated names read, one per line, made safe.
+safe_lines() {
+    local name
+    while IFS= read -r -d '' name; do
+	safe "$name"
+	echo
+    done
+}
+
+# indent: show the lines read, made safe, indented.
+indent() {
+    safe_text | sed 's/^/  /'
+}
+
+die() {
+    echo "ai: $(safe "$*")" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: ai [-w|--work [--ro PATTERN...]...] [--ssh] [-- COMMAND [ARG...]]
+       ai --status
+       ai --promote PATH...
+       ai --reset | --forget [DIR] | --list
+
+Run an interactive shell, or COMMAND, for an AI agent in a sandbox: it
+gets its own home (~/AI/home) and the internet, but not the rest of
+your files, your local network, your SSH keys or your Git history, and
+its CPU, memory and processes are limited.
+
+Options:
+  -w, --work              Work in the current directory: mount it
+                          read-write at /work/PATH, PATH being its path
+                          relative to your home.  Its Git history and
+                          tool settings stay protected, and the agent's
+                          changes to its home stay in the project.
+                          Without -w, the sandbox starts in the agent's
+                          home, e.g. to install tools for all projects.
+  --ro PATTERN...         Make what matches the patterns, up to the next
+  --read-only PATTERN...  option or "--", read-only (needs -w).  Without
+                          "/", a pattern matches names anywhere
+                          ('*.pdf'); with "/", paths ('docs/*.pdf');
+                          "." is the whole work directory.  Quote
+                          patterns to reach subdirectories.
+  --ssh                   Give the sandbox an SSH agent holding only
+                          ~/.ssh/id_ed25519_ai, usable on the hosts of
+                          AI_SSH_HOSTS (changeable in ~/AI/config).
+  --status                Show the project containing the current directory:
+                          the agent's branches with commits not in
+                          yours, the private copies, whether a session
+                          is running.
+  --promote PATH...       In a project, make its version of these files
+                          of the agent's home (~/.bashrc...) the base
+                          one, for every project, after showing it.
+  --reset                 Delete the project's changes to the agent's
+                          home (history, memory...), after asking.
+  --forget [DIR]          Delete everything ai keeps for the project, or
+                          for the project DIR, even gone (clones, private
+                          copies, home changes), and the "ai" remote of
+                          its repositories, after asking.
+  --list                  List the projects: size, latest session, those
+                          running or gone.
+  -h, --help              Show this help.
+  -- COMMAND [ARG...]     Run COMMAND instead of a shell.
+
+Resource limits, from the environment:
+  AI_MEMORY  memory (default: 50% of the RAM)
+  AI_SWAP    swap (default: half of the swap)
+  AI_CPUS    CPUs (default: half of them)
+  AI_TASKS   processes and threads (default: 1024)
+
+Examples:
+  ai -w                               a shell in the current directory
+  ai -w -- claude                     run an agent there
+  ai -w --ro '*.pdf' data/raw -- claude
+  AI_CPUS=2 ai -w
+
+To bring the agent's commits back, in your repository: git fetch ai.
+More in the README: https://github.com/Chris00/ai-sandbox
+EOF
+}
+
+# --help and the commands on projects first: they need neither the
+# resource limits nor the checks.  Arguments after "--" belong to the
+# command.
+action=                    # status, promote, reset, forget or list
+for arg; do
+    case $arg in
+	--) break ;;
+	-h|--help) usage; exit 0 ;;
+	--status|--promote|--reset|--forget|--list) action=${arg#--} ;;
+    esac
+done
+unset arg
+
+# --- Configuration ------------------------------------------------------
+
+# Sourced, so it runs with your rights: refuse it if someone else could
+# have changed it.
+if [ -e "$AI_CONFIG" ]; then
+    perm=$(stat -L -c %a -- "$AI_CONFIG") || exit 1
+    [ -O "$AI_CONFIG" ] && (( (8#$perm & 8#022) == 0 )) ||
+	die "$AI_CONFIG must be yours, and writable by you only (chmod 600)."
+    # shellcheck source=/dev/null
+    . "$AI_CONFIG"
+    unset perm
+fi
+
+# Entries the agent creates during the session can't be protected: the
+# check at exit reports new and changed ones (and new repos).
+TRIGGERS=(.git "${PRIVATE[@]}" "${READONLY[@]}")
+
+for e in "${AI_ENV[@]}" "${AI_PROJECT_ENV[@]}"; do
+    # Only the name: the value may be a secret.
+    [[ $e =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] ||
+	die "AI_ENV and AI_PROJECT_ENV take NAME=value entries, not \"${e%%=*}...\"."
+done
+unset e
+
+# --- Resource limits ----------------------------------------------------
+#
+# The whole session (sandbox, slirp4netns, ssh-agent) runs in a systemd
+# scope with resource limits.  The defaults can be changed from the
+# environment, e.g. "AI_CPUS=2 ai -w".
+AI_MEMORY=${AI_MEMORY:-50%}             # of the RAM
+AI_SWAP=${AI_SWAP:-$(awk '/^SwapTotal:/ { print int($2 / 2) "K" }' /proc/meminfo)}
+AI_CPUS=${AI_CPUS:-$(( ($(nproc) + 1) / 2 ))}
+AI_TASKS=${AI_TASKS:-1024}              # processes and threads
+[[ $AI_CPUS =~ ^[1-9][0-9]*$ && $AI_TASKS =~ ^[1-9][0-9]*$ ]] ||
+    die "AI_CPUS and AI_TASKS must be positive integers."
+
+if [ -z "$AI_IN_SCOPE" ] && [ -z "$action" ]; then
+    if systemctl --user show-environment >/dev/null 2>&1; then
+	AI_IN_SCOPE=1 exec systemd-run --user --scope --quiet \
+	    --description="AI sandbox" \
+	    -p MemoryMax="$AI_MEMORY" \
+	    -p MemorySwapMax="$AI_SWAP" \
+	    -p CPUQuota="$((AI_CPUS * 100))%" \
+	    -p CPUWeight=50 \
+	    -p IOWeight=50 \
+	    -p TasksMax="$AI_TASKS" \
+	    -p OOMPolicy=continue \
+	    -- "$(realpath -- "${BASH_SOURCE[0]}")" "$@"
+    fi
+    echo "ai: no systemd user session: running WITHOUT resource limits." >&2
+fi
+
+# --- Options ------------------------------------------------------------
+
+ssh=
+work_path=
+read_only=()
+cmd=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+	-w|--work)
+	    # The "." keeps a final newline of the name: $(...) would drop it.
+	    work_path=$(realpath -e -- . && echo .) ||
+		die "Cannot resolve the current directory."
+	    work_path=${work_path%$'\n.'}
+	    shift
+	    ;;
+	--ssh)
+	    ssh=1
+	    shift
+	    ;;
+	--status|--reset|--list)
+	    shift                       # $action is already set
+	    ;;
+	--forget)
+	    shift
+	    # An optional DIR, e.g. a project whose directory is gone.
+	    if [ $# -gt 0 ] && [[ $1 != -* ]]; then
+		forget_dir=$1
+		shift
+	    fi
+	    ;;
+	--promote)
+	    shift
+	    promote_paths=("$@")
+	    [ $# -gt 0 ] || die "--promote needs the paths to promote."
+	    break
+	    ;;
+	--ro|--read-only)
+	    # All the patterns up to the next option or "--": an unquoted
+	    # glob, expanded by the shell, gives several.  A pattern
+	    # starting with "-" needs the --ro=PATTERN form or "./".
+	    [ $# -ge 2 ] && [[ $2 != -* ]] || die "$1 needs at least one pattern."
+	    shift
+	    while [ $# -gt 0 ] && [[ $1 != -* ]]; do
+		read_only+=("$1")
+		shift
+	    done
+	    ;;
+	--ro=*|--read-only=*)
+	    read_only+=("${1#*=}")
+	    shift
+	    ;;
+	--)
+	    shift
+	    cmd=("$@")
+	    [ ${#cmd[@]} -gt 0 ] || die "Nothing after \"--\": give the command to run."
+	    break
+	    ;;
+	-*)
+	    die "Unknown option $1 (see ai --help)."
+	    ;;
+	*)
+	    die "Unexpected \"$1\": put the command to run after \"--\" (see ai --help)."
+	    ;;
+    esac
+done
+if [ -n "$action" ] && [ -n "$work_path$ssh${read_only[*]}${cmd[*]}" ]; then
+    die "--$action takes no other option."
+fi
+
+# --- Helpers ------------------------------------------------------------
+
+# On some distributions (such as Fedora), /home is a symlink.
+home=$(realpath -e -- "$HOME") || die "Cannot resolve \$HOME."
+
+# Host-side Git: never run hooks or the fsmonitor.
+git() {
+    /usr/bin/git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+
+# rel_to_pwd PATH, rel_to_home PATH: PATH to show, relative to the
+# current directory or to your home if under it, and `safe`.
+rel_to_pwd() {
+    case $1 in
+	"$PWD")   echo . ;;
+	"$PWD"/*) safe "./${1#"$PWD"/}"; echo ;;
+	*)        safe "$1"; echo ;;  # not under the current directory
+    esac
+}
+
+# glob_escape VAR PATH: set VAR to PATH as a pattern matching itself
+# only (for find's -path, -name...).  (Not output: $(...) would drop a
+# final newline of the name.)
+glob_escape() {
+    local s=$2
+    s=${s//\\/\\\\}
+    s=${s//\*/\\*}
+    s=${s//\?/\\?}
+    s=${s//\[/\\[}
+    s=${s//\]/\\]}
+    printf -v "$1" '%s' "$s"
+}
+
+rel_to_home() {
+    case $1 in
+	"$HOME")   echo "~" ;;
+	"$HOME"/*) safe "~/${1#"$HOME"/}"; echo ;;
+	*)         safe "$1"; echo ;;  # not under $HOME
+    esac
+}
+
+# inside A B: true if A, a `realpath`, is B or in it.  B may not
+# exist; its symlinks are resolved.
+inside() {
+    local b
+    b=$(realpath -m -- "$2") || return 1
+    [[ $1 == "$b" || $1 == "$b"/* ]]
+}
+
+# overlaps A B: true if A, a `realpath`, is B or in it or contains B.
+# B may not exist; its symlinks are resolved.
+overlaps() {
+    local b
+    b=$(realpath -m -- "$2") || return 1
+    [[ $1 == "$b" || $1 == "$b"/* || $b == "$1"/* ]]
+}
+
+# Where a .git symlink or gitfile ("gitdir: PATH") points to.
+git_link_target() {
+    local f=$1 target
+    if [ -L "$f" ]; then
+	realpath -m -- "$f"
+    else
+	target=$(sed -n '1s/^gitdir: //p' -- "$f")
+	case $target in
+	    /*) realpath -m -- "$target" ;;
+	    *)  realpath -m -- "${f%/.git}/$target" ;;
+	esac
+    fi
+}
+
+in_list() {    # in_list WORD LIST...: true if WORD is in LIST
+    local w=$1 x
+    shift
+    for x; do
+	[ "$x" = "$w" ] && return 0
+    done
+    return 1
+}
+
+confirm() {    # confirm QUESTION: true if the user answers yes
+    local answer
+    read -r -p "$1 [y/N] " answer </dev/tty || return 1
+    [[ $answer == [yY]* ]]
+}
+
+# The checks on the work dir below skip what the sandbox doesn't see of
+# it: the find tests in $hidden (set once the work dir is known).
+
+# Files in $1 that the sandbox can modify, with a hard link outside $1
+# or to a read-only file in it ($ro_paths): writing through the first
+# name changes the others.  Files whose names in $1 are all read-only
+# aren't reported.  One per line, made safe.
+outside_hardlinks() {
+    awk 'BEGIN { RS = "\0"; ORS = "\0" }
+         # Record read-only `realpath`s
+         FILENAME == ARGV[1] { if ($0 != "") ro[++nro] = $0; next }
+         # Format: DEVICE:INODE NLINKS PATH
+         { k = $1; n[k] = $2; c[k]++
+           path = substr($0, length($1) + length($2) + 3)
+           for (i = 1; i <= nro; i++)
+               if (path == ro[i] || index(path, ro[i] "/") == 1) break
+           # i ≤ nro ⇔ read-only, record name in r.
+           if (i <= nro) { if (!(k in r)) r[k] = path }
+           else { w[k]++; if (!(k in p)) p[k] = path } }
+         END { for (k in c)
+                   if (w[k] > 0 && c[k] < n[k]) print p[k]
+                   else if (w[k] > 0 && (k in r))
+                       print p[k] "  (same file as read-only " r[k] ")" }' \
+    <([ ${#ro_paths[@]} -eq 0 ] || printf '%s\0' "${ro_paths[@]}") \
+    <(find "$1" \( "${hidden[@]}" \) -prune -o -type f -links +1 -printf '%D:%i %n %p\0') |
+	safe_lines
+}
+
+# File systems mounted inside $1 (bwrap binds recursively).
+inner_mounts() {
+    local m
+    findmnt -rn -o TARGET | while IFS= read -r m; do
+	case $m in "$1"/*) echo "$m" ;; esac
+    done
+}
+
+# Unix sockets or named pipes in $1, one per line, made safe.  They
+# work across namespaces: the sandbox could talk to the host program
+# listening on one, bypassing the firewall.
+inner_sockets() {
+    find "$1" \( "${hidden[@]}" \) -prune -o \( -type s -o -type p \) -print0 |
+	safe_lines
+}
+
+# Symlinks in $1 resolving outside it, as NUL-separated "link → target".
+outside_symlinks() {
+    local f target
+    while IFS= read -r -d '' f; do
+	case $(realpath -m -- "$f") in
+	    "$1"|"$1"/*) ;;
+	    *)  target=$(readlink -- "$f" && echo .)
+		printf '%s → %s\0' "$(rel_to_pwd "$f")" "$(safe "${target%$'\n.'}")" ;;
+	esac
+    done < <(find "$1" \( "${hidden[@]}" \) -prune -o -type l -print0)
+}
+
+trigger_expr=()
+for t in "${TRIGGERS[@]}"; do
+    trigger_expr+=(-o -name "$t")
+done
+trigger_expr=("${trigger_expr[@]:1}")
+unset t
+
+# find_icon NAME FALLBACK: the icon NAME of the notifications, in the
+# repo next to the script or installed in your icon theme; otherwise
+# the theme's icon FALLBACK.
+find_icon() {
+    local icon
+    for icon in \
+	"$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/icons/$1.svg" \
+	    "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/$1.svg"
+    do
+	if [ -r "$icon" ]; then
+	    printf '%s' "$icon"
+	    return
+	fi
+    done
+    printf '%s' "$2"
+}
+TRIGGER_ICON=$(find_icon ai-sandbox-warning dialog-warning)
+AGENT_EVENT_ICON=$(find_icon ai-sandbox dialog-information)
+
+# markup TEXT: TEXT for the body of a notification, which some
+# notification servers read as markup (<b>, <a href>...).
+markup() {
+    # Quoted: since bash 5.2, an unquoted & in the replacement stands for
+    # the matched text.
+    local amp='&amp;' lt='&lt;' gt='&gt;' t
+    t=${1//&/"$amp"}
+    t=${t//</"$lt"}
+    printf '%s' "${t//>/"$gt"}"
+}
+
+# valid_utf8 TEXT: TEXT without the bytes that aren't UTF-8: notify-send
+# refuses it otherwise, and the notification would be lost.
+valid_utf8() {
+    printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null
+}
+
+# report_trigger DIR PATH: a new $TRIGGERS entry PATH appeared in the
+# work dir DIR.  Log it and, when possible, show a desktop notification.
+report_trigger() {
+    local dir=$1 path where
+    path=$(safe "$2")
+    where="${dir##*/}/${path#"$dir"/}"
+    printf '%s New during the session in %s: %s\n' \
+	   "$(date '+%F %T')" "$dir" "$path" >>"$AI_LOG"
+    if command -v notify-send >/dev/null; then
+	notify-send -a ai -u critical -i "$TRIGGER_ICON" \
+		    "ai: new ${path##*/}" \
+		    "$(valid_utf8 "$(markup "$where") was just created, by you or the agent. Review it before using the project on your machine.")" \
+		    2>/dev/null
+    fi
+}
+
+# watch_agent_events NAME: read the events the agent reports on stdin
+# (the pipe $AI_NOTIFY), one word per line, and show a notification
+# about the session NAME for those of $AGENT_EVENTS, at most one of
+# each every 5 seconds, so that the agent can't flood your desktop.
+# Words are cut at 32 bytes: the rest is read as another one.
+watch_agent_events() {
+    local name event
+    local -A last=()
+    name=$(valid_utf8 "$(safe "$1")")   # a title: not markup
+    # LC_ALL=C: in bytes.  In UTF-8, a byte starting a character would
+    # take the newline and the next word with it.
+    while IFS= LC_ALL=C read -r -n 32 event; do
+	[[ $event =~ ^[a-z_]+$ && -n ${AGENT_EVENTS[$event]+x} ]] || continue
+	(( SECONDS - ${last[$event]:--5} >= 5 )) || continue
+	last[$event]=$SECONDS
+	command -v notify-send >/dev/null &&
+	    notify-send --hint=boolean:transient:true \
+			-a ai -i "$AGENT_EVENT_ICON" "ai: $name" \
+			"The agent ${AGENT_EVENTS[$event]}." 2>/dev/null
+    done
+}
+
+# watch_triggers DIR: read the events of inotifywait, NUL-separated
+# "EVENTS<TAB>PATH", and report the new $TRIGGERS entries in DIR.
+watch_triggers() {
+    local dir=$1 event events path p
+    local -a found
+    local -A seen
+    # The protected entries, including the mount points created
+    # for absent PRIVATE ones, are out of the agent's reach.
+    if [ -f "$tmp/protected" ]; then
+	while IFS= read -r -d '' p; do
+	    seen[$p]=1
+	done <"$tmp/protected"
+    fi
+    while IFS= read -r -d '' event; do
+	events=${event%%$'\t'*}
+	path=${event#*$'\t'}
+	found=()
+	in_list "${path##*/}" "${TRIGGERS[@]}" && found+=("$path")
+	if [[ $events == *ISDIR* ]]; then
+	    # A new directory, or one moved in: inotifywait only watches
+	    # it once it exists, so what is created in it before is missed.
+	    mapfile -d '' -t -O "${#found[@]}" found < <(
+		find "$path" -mindepth 1 \( "${trigger_expr[@]}" \) \
+		     -prune -print0 2>/dev/null
+	    )
+	fi
+	for p in "${found[@]}"; do
+	    [ -n "${seen[$p]}" ] && continue
+	    seen[$p]=1
+	    report_trigger "$dir" "$p"
+	done
+    done
+}
+
+# start_watch DIR: watch DIR for new $TRIGGERS entries until the script
+# exits.  Sets $watch_pid and $watch_reader.  Returns once the watches
+# are set, so that nothing the sandbox creates is missed.
+start_watch() {
+    local dir=$1 exclude i
+    # The contents of .git and of the PRIVATE directories don't matter
+    # (your own builds there would only cost watches): only entries
+    # appearing in them.  The names only need their dots escaped.
+    exclude=$(printf '%s\n' .git "${PRIVATE[@]}" |
+		  sed 's/\./\\./g' | paste -sd '|')
+    mkfifo "$tmp/watch" || return
+    # Created now: inotifywait, started in the background, could open it
+    # after the loop below first reads it.
+    : >"$tmp/watch.log"
+    inotifywait -m -r -e create -e moved_to \
+		--exclude "/($exclude)/" --format $'%e\t%w%f%0' --no-newline \
+		"$dir" >"$tmp/watch" 2>"$tmp/watch.log" 7>&- 9>&- &
+    watch_pid=$!
+    watch_triggers "$dir" <"$tmp/watch" 7>&- 9>&- &
+    watch_reader=$!
+    # inotifywait says so once all the watches are set; on a large tree
+    # it takes a while.
+    for ((i = 0; i < 300; i++)); do
+	grep -q '^Watches established' "$tmp/watch.log" && return
+	kill -0 "$watch_pid" 2>/dev/null || break
+	sleep 0.1
+    done
+    echo "Watching for new tool files failed or is slow: see $tmp/watch.log." >&2
+    grep -i -E 'error|failed|limit' "$tmp/watch.log" >&2
+}
+
+# The triggers in $1, as NUL-separated "path<TAB>latest change time of
+# their contents".  Change times (ctime), unlike modification times,
+# cannot be set back by the sandbox.
+host_triggers() {
+    local item times
+    while IFS= read -r -d '' item; do
+	if [ "${item##*/}" = .git ] && [ -d "$item" ]; then
+	    # Only what makes Git run code; the objects are data.
+	    times=$(find "$item/config" "$item/hooks" -printf '%C@\n' 2>/dev/null)
+	elif in_list "${item##*/}" "${PRIVATE[@]}"; then
+	    # Build output can hold many files: existing ones are protected
+	    # and new ones are reported anyway, their path being new.
+	    times=$(find "$item" -maxdepth 0 -printf '%C@\n' 2>/dev/null)
+	else
+	    times=$(find "$item" -printf '%C@\n' 2>/dev/null)
+	fi
+	printf '%s\t%s\0' "$item" "$(sort -n <<<"$times" | tail -n 1)"
+    done < <(find "$1" \( "${trigger_expr[@]}" \) -prune -print0)
+}
+
+# home_snapshot DIR [PATTERN...]: the files in DIR, the agent's home or
+# a layer of it (only those matching the glob PATTERNs, if given), as
+# sorted NUL-separated "TYPE<TAB>CTIME<TAB>PATH", PATH being relative to
+# DIR, and TYPE "d" for a whiteout, which records a deletion in a layer,
+# "f" otherwise.  CTIME is the time of the latest change: the sandbox
+# can't set it back.  It is 0 for whiteouts: overlayfs makes them hard
+# links to one file, whose ctime changes at each mount.
+home_snapshot() {
+    local dir=$1 pat
+    local -a starts=()
+    shift
+    (
+	cd -- "$dir" 2>/dev/null || exit 0
+	if [ $# -eq 0 ]; then
+	    starts=(.)
+	else
+	    shopt -s nullglob
+	    for pat; do
+		starts+=($pat)      # unquoted: expand the globs
+	    done
+	    [ ${#starts[@]} -gt 0 ] || exit 0
+	fi
+	find "${starts[@]}" -mindepth 0 \( -type c -printf 'd\t0\t%p\0' -o \
+	     ! -type d -printf 'f\t%C@\t%p\0' \) 2>/dev/null
+    ) | LC_ALL=C sed -z 's|^\(.\t[^\t]*\t\)\./|\1|' | LC_ALL=C sort -z
+}
+
+# home_match PATH PATTERN...: true if PATH, relative to the agent's
+# home, matches one of the PATTERNs (see $HOME_TRIGGERS) or is in one.
+home_match() {
+    local path=$1 pat
+    shift
+    for pat; do
+	# shellcheck disable=SC2053     # $pat is a glob
+	[[ $path == $pat || $path == $pat/* ]] && return 0
+    done
+    return 1
+}
+
+# home_group PATH: set $group_key and $group_rank for PATH, relative to
+# the agent's home, from the first pattern of $HOME_GROUPS (its index is
+# the rank) that matches PATH or one of its directories, the shortest:
+# the key is that directory followed by "/", or PATH itself.  False if
+# none matches.  (Variables, not output: it runs once per file.)
+home_group() {
+    local prefix part i
+    local -a parts
+    IFS=/ read -r -a parts <<<"$1"
+    for i in "${!HOME_GROUPS[@]}"; do
+	prefix=
+	for part in "${parts[@]}"; do
+	    prefix=${prefix:+$prefix/}$part
+	    # shellcheck disable=SC2053     # the pattern is a glob
+	    if [[ $prefix == ${HOME_GROUPS[i]} ]]; then
+		group_rank=$i
+		if [ "$prefix" = "$1" ]; then
+		    group_key=$1
+		else
+		    group_key=$prefix/
+		fi
+		return 0
+	    fi
+	done
+    done
+    return 1
+}
+
+# summarize_home [triggers]: sum up the files of the agent's home read
+# on stdin, NUL-separated "TYPE PATH" (TYPE "d" for a deletion, "f"
+# otherwise), PATH relative to the home: one line per entry, those of
+# $HOME_GROUPS first, then the others two levels down (.claude/plugins/),
+# a directory with a single file shown as that file.  "!" marks the
+# entries with $HOME_TRIGGERS; with "triggers", only those are shown.
+# Of the files of $HOME_IGNORE that aren't triggers, only the number is
+# given.  Prints nothing if there is nothing to show.
+summarize_home() {
+    local only=$1 entry path key trig n m ignored=0 LC_ALL=C
+    local -A count=() first=() rank=() mark=()
+    local -a parts
+    while IFS= read -r -d '' entry; do
+	path=${entry#? }
+	# From the agent: made safe, like safe does.
+	path=${path//[[:cntrl:]]/?}
+	path=${path//$'\xc2'[$'\x80'-$'\x9f']/?}
+	if home_match "$path" "${HOME_TRIGGERS[@]}"; then
+	    trig=1
+	elif home_match "$path" "${HOME_IGNORE[@]}"; then
+	    ignored=$((ignored + 1))
+	    continue
+	else
+	    trig=
+	fi
+	if home_group "$path"; then
+	    key=$group_key
+	else
+	    IFS=/ read -r -a parts <<<"$path"
+	    if [ ${#parts[@]} -gt 2 ]; then
+		key="${parts[0]}/${parts[1]}/"
+	    else
+		key=$path
+	    fi
+	    group_rank=${#HOME_GROUPS[@]}
+	fi
+	if [ -z "${count[$key]+x}" ]; then
+	    rank[$key]=$group_rank
+	    first[$key]=$path
+	    [ "${entry%% *}" = d ] && first[$key]="$path (deleted)"
+	fi
+	count[$key]=$(( ${count[$key]:-0} + 1 ))
+	[ -z "$trig" ] || mark[$key]=1
+    done
+    n=0
+    while IFS=$'\t' read -r -d '' _ key; do
+	[ -n "${mark[$key]}" ] || [ "$only" != triggers ] || continue
+	n=$((n + 1))
+	m='  '
+	[ -z "${mark[$key]}" ] || m='! '
+	if [ "${count[$key]}" -eq 1 ]; then
+	    printf '%s%s\n' "$m" "${first[$key]}"
+	else
+	    printf '%s%s (%d files)\n' "$m" "$key" "${count[$key]}"
+	fi
+    done < <(for key in "${!count[@]}"; do
+		 printf '%s\t%s\0' "${rank[$key]}" "$key"
+	     done | sort -z -t $'\t' -k1,1n -k2)
+    if [ "$n" -gt 0 ] && [ "$only" != triggers ] && [ "$ignored" -gt 0 ]; then
+	echo "  and $ignored more in HOME_IGNORE (histories, caches...)."
+    fi
+}
+
+# home_changes: the changes the session made to the agent's home
+# (since the snapshot $tmp/home.before), for summarize_home.
+home_changes() {
+    LC_ALL=C comm -z -13 "$tmp/home.before" <(home_snapshot "${home_watch[@]}") |
+	LC_ALL=C sed -z 's/^\(.\)\t[^\t]*\t/\1 /'
+}
+
+# The NUL-separated entries printed now by "$@" that are not in the
+# snapshot file $1, NUL-separated too.
+new_since() {
+    local before=$1
+    shift
+    LC_ALL=C comm -z -13 "$before" <("$@" | LC_ALL=C sort -z)
+}
+
+# new_triggers: the new or changed $TRIGGERS of the work dir, made safe,
+# one per line.  The protected entries are out of the agent's reach:
+# changes to them are yours.
+new_triggers() {
+    local entry path
+    local -A protected=()
+    if [ -f "$tmp/protected" ]; then
+	while IFS= read -r -d '' path; do
+	    protected[$path]=1
+	done <"$tmp/protected"
+    fi
+    while IFS= read -r -d '' entry; do
+	path=${entry%$'\t'*}
+	[ -n "${protected[$path]}" ] || printf '%s\n' "$(safe "$path")"
+    done < <(new_since "$tmp/triggers.before" host_triggers "$work_path")
+}
+
+if [ -t 1 ]; then
+    red=$'\e[31m' normal=$'\e[0m'
+else
+    red= normal=
+fi
+
+# project_dir DIR: the directory of $PROJECTS for the project DIR (a
+# `realpath`): its path escaped by systemd-escape, so that projects
+# never nest, and readable ("home-you-software-proj").  A long path,
+# all the more a non-ASCII one (each byte gives 4 characters), would
+# exceed the 255 bytes of a file name: its name then keeps only the
+# beginning, followed by a hash of the whole path.
+project_dir() {
+    local name
+    name=$(systemd-escape --path -- "$1") || exit 1
+    if [ ${#name} -gt 200 ]; then       # ASCII: characters are bytes
+	name="${name:0:183}-$(printf '%s' "$1" | sha256sum | cut -c1-16)"
+    fi
+    printf '%s/%s' "$PROJECTS" "$name"
+}
+
+# check_plain_config G: refuse to go on unless the config of the .git
+# directory G is a regular file with no other name: git config writes
+# through symlinks and hard links.
+check_plain_config() {
+    if [ -e "$1/config" ] || [ -L "$1/config" ]; then
+	if [ -L "$1/config" ] || [ ! -f "$1/config" ] ||
+	       [ "$(stat -c %h -- "$1/config")" -ne 1 ]; then
+	    die "$1/config is not a plain file: not touching ${1%/.git}."
+	fi
+    fi
+}
+
+# git_repos DIR: the .git directories under DIR, NUL-separated,
+# shallowest first, so that an enclosing repo comes before the repos
+# nested in it.
+git_repos() {
+    find "$1" -name .git -type d -prune -printf '%d\t%p\0' |
+	LC_ALL=C sort -z -n -s -k1,1 |
+	cut -z -f2-
+}
+
+# protect_repos DIR MOUNT: hide the real .git of each repo under DIR
+# behind a clone in the project's git/, and show the real one read-only
+# under /upstream.  MOUNT is where DIR is mounted in the sandbox.
+# Modify $args to bind the copy (RW) and the upstream (RO).
+#
+# DIR must be the `realpath`.
+protect_repos() {
+    local dir=$1 mount=$2 f g repo rel copy upstream hooks
+    local -a links repos
+
+    # .git files (submodules, worktrees) and symlinks: their Git data
+    # is elsewhere.  It stays hidden when it is outside the work dir or
+    # in a protected .git, but is exposed when it is anywhere else in
+    # the work dir.
+    mapfile -d '' -t links < <(
+	find "$dir" -name .git \( -type d -prune -o \( -type f -o -type l \) -print0 \)
+    )
+    for f in "${links[@]}"; do
+	target=$(git_link_target "$f")
+	case $target in
+	    */.git|*/.git/*)
+		echo "Not handled (submodule or worktree): $(rel_to_pwd "${f%/.git}")" >&2 ;;
+	    "$dir"|"$dir"/*)
+		echo "$(rel_to_pwd "$f") points to $(rel_to_pwd "$target"), inside the work dir:" >&2
+		echo "  that repo's history, config and hooks are NOT protected." >&2
+		confirm "  Continue anyway?" || exit 1 ;;
+	    *)
+		echo "Not handled (Git data outside the work dir): $(rel_to_pwd "${f%/.git}")" >&2 ;;
+	esac
+    done
+
+    # Shallowest first, so that an enclosing repo is cloned before the
+    # repos nested in it (Git refuses to clone into a non-empty dir).
+    mapfile -d '' -t repos < <(git_repos "$dir")
+
+    for g in "${repos[@]}"; do
+	# $g is the absolute path to .git directory.
+	repo=${g%/.git}
+	rel=${repo#"$dir"}
+	rel=${rel#/}                    # empty for the work dir itself
+	copy="$project/git${rel:+/$rel}"
+	# Where the sandbox sees your repo: /upstream mirrors the project,
+	# with only the .git directories, read-only.  The clone records it
+	# as its origin, so it must not change.
+	upstream="/upstream${rel:+/$rel}"
+
+	printf 'Git %s%s%s → %s\n' "$red" "$(rel_to_pwd "$repo")" "$normal" \
+	       "$(rel_to_home "$copy")"
+
+	check_plain_config "$g"
+
+	# Hooks kept in the working tree (e.g. Husky's ".husky") are
+	# writable by the sandbox and run at your next commit.
+	hooks=$(/usr/bin/git config --file "$g/config" core.hooksPath)
+	case $hooks in
+	    ""|/dev/null) ;;
+	    /*) [[ $hooks == "$repo"/* ]] &&
+		    echo "  core.hooksPath is inside the work tree: review $hooks after the session." >&2 ;;
+	    *)  echo "  core.hooksPath is inside the work tree: review $hooks after the session." >&2 ;;
+	esac
+
+	if [ ! -d "$copy/.git" ]; then
+	    # No copy yet: either a repo of yours seen for the first time,
+	    # or one the AI created in the shared tree in an earlier
+	    # session, whose configuration would be untrusted.
+	    confirm "  New repo: did you create it yourself?" ||
+		die "Not trusting $repo."
+
+	    mkdir -p -- "$(dirname -- "$copy")" || exit 1
+	    # Cloning reads the source through upload-pack, which is
+	    # safe even in an untrusted repo.
+	    git clone --no-local --no-checkout --quiet -- "$repo" "$copy" ||
+		exit 1
+	    # Safe: the copy was just created.  Fill its index from HEAD
+	    # (fails harmlessly on a repo without commits) and point its
+	    # origin at the read-only view of your repo in the sandbox.
+	    git -C "$copy" reset --quiet 2>/dev/null
+	    git -C "$copy" remote set-url origin "$upstream"
+	    # Writing the config file directly runs nothing.
+	    /usr/bin/git config --file "$g/config" --remove-section remote.ai \
+			 2>/dev/null
+	    /usr/bin/git config --file "$g/config" remote.ai.url "$copy"
+	    /usr/bin/git config --file "$g/config" remote.ai.fetch \
+			 '+refs/heads/*:refs/remotes/ai/*'
+	    /usr/bin/git config --file "$g/config" remote.ai.tagOpt --no-tags
+	    /usr/bin/git config --file "$g/config" fetch.fsckObjects true
+	fi
+
+	args+=(
+	    --bind "$copy/.git" "$mount/${g#"$dir"/}"
+	    --ro-bind "$g" "$upstream/.git"
+	)
+    done
+}
+
+# protect_tool_files DIR MOUNT: in the sandbox, replace the $PRIVATE
+# entries under DIR by private copies kept in the project's shadow/,
+# and make the $READONLY ones read-only.  MOUNT is where DIR is mounted
+# in the sandbox.  Modify $args, and record the protected paths, NUL-separated,
+# in $tmp/protected, the mount points created in your tree in
+# $tmp/created (removed at exit), and the replaced directories in
+# $shadowed (skipped by the checks).  Symlinks are skipped: a mount on one
+# would land wherever it points in the sandbox.
+#
+# DIR must be the `realpath`.
+protect_tool_files() {
+    local dir=$1 mount=$2 shadow_base="$project/shadow" p rel name
+    local -a expr found
+    : >"$tmp/protected"
+    : >"$tmp/created"
+
+    expr=()
+    for name in "${PRIVATE[@]}" "${READONLY[@]}"; do
+	expr+=(-o -name "$name")
+    done
+    mapfile -d '' -t found < <(
+	find "$dir" -name .git -prune -o \( "${expr[@]:1}" \) \
+	     \( -type d -o -type f \) -prune -print0
+    )
+    # PRIVATE entries the project's tools would create at the top.
+    for name in "${!PRIVATE_IF[@]}"; do
+	p="$dir/$name"
+	if [ ! -e "$p" ] && [ ! -L "$p" ] && [ -e "$dir/${PRIVATE_IF[$name]}" ]; then
+	    found+=("$p")
+	    printf '%s\0' "$p" >>"$tmp/created"
+	fi
+    done
+
+    for p in "${found[@]}"; do
+	rel=${p#"$dir"/}
+	name=${p##*/}
+	if in_list "$name" "${PRIVATE[@]}"; then
+	    # A file named like a PRIVATE directory is left alone.
+	    [ -d "$p" ] || [ ! -e "$p" ] || continue
+	    # Create the mount point ourselves: bwrap couldn't if the work
+	    # dir is read-only in the sandbox (--ro .).
+	    [ -e "$p" ] || mkdir -- "$p" || exit 1
+	    mkdir -p -- "$shadow_base/$rel" || exit 1
+	    args+=(--bind "$shadow_base/$rel" "$mount/$rel")
+	    shadowed+=("$p")
+	    printf "Private in the sandbox: %s%s%s\n" \
+		   "$red" "$(rel_to_pwd "$p")" "$normal" >&2
+	else
+	    args+=(--ro-bind "$p" "$mount/$rel")
+	    ro_paths+=("$p")
+	    printf "Read-only in the sandbox: %s%s%s\n" \
+		   "$red" "$(rel_to_pwd "$p")" "$normal" >&2
+	fi
+	printf '%s\0' "$p" >>"$tmp/protected"
+    done
+}
+
+# protect_read_only DIR MOUNT PATTERN...: make what matches the
+# PATTERNs (see --ro) under DIR read-only in the sandbox, where DIR is
+# mounted at MOUNT.  Modify $args.  Only what exists now is protected:
+# files matching a pattern that the agent creates later are writable.
+# The .git and $PRIVATE directories are skipped: the sandbox sees a
+# clone or a private copy there.  Symlinks are skipped too: a mount on
+# one would land wherever it points in the sandbox.
+#
+# DIR must be the `realpath`.
+protect_read_only() {
+    local dir=$1 mount=$2 pat dir_glob p n total=0
+    local -a skip test found
+    shift 2
+    skip=(-name .git)
+    for n in "${PRIVATE[@]}"; do
+	skip+=(-o -name "$n")
+    done
+    # find's -path takes a pattern: escape the work dir's own path.
+    glob_escape dir_glob "$dir"
+
+    for pat; do
+	case $pat in
+	    /*) # An absolute path or pattern must be in the work dir.
+		case $pat/ in
+		    "$dir"/*)
+			pat=${pat#"$dir"}
+			pat=${pat#/}
+			pat=${pat:-.}
+			;;
+		    *) die "--ro: $pat is not in the work dir ($dir)." ;;
+		esac ;;
+	esac
+	pat=${pat%/}
+	pat=${pat#./}
+	if [ "$pat" = . ] || [ -z "$pat" ]; then
+	    found=("$dir")
+	else
+	    if [[ $pat == */* ]]; then
+		test=(-path "$dir_glob/$pat")
+	    else
+		test=(-name "$pat")
+	    fi
+	    mapfile -d '' -t found < <(
+		find "$dir" -mindepth 1 \( "${skip[@]}" \) -prune -o \
+		     "${test[@]}" -prune -print0
+	    )
+	fi
+	n=0
+	for p in "${found[@]}"; do
+	    if [ -L "$p" ]; then
+		echo "--ro: symlink skipped: $(rel_to_pwd "$p")" >&2
+		continue
+	    fi
+	    if [ "$p" = "$dir" ]; then
+		args+=(--ro-bind "$dir" "$mount")
+	    else
+		args+=(--ro-bind "$p" "$mount/${p#"$dir"/}")
+	    fi
+	    ro_paths+=("$p")
+	    n=$((n + 1))
+	done
+	if [ "$n" -eq 0 ]; then
+	    echo "--ro: nothing matches '$pat' in the current dir." >&2
+	elif [ "$n" -le 3 ]; then
+	    for p in "${found[@]}"; do
+		[ -L "$p" ] ||
+		    printf 'Read-only in the sandbox: %s%s%s\n' \
+			   "$red" "$(rel_to_pwd "$p")" "$normal" >&2
+	    done
+	else
+	    printf "Read-only in the sandbox: %s entries matching %s'%s'%s.\n" \
+		   "$n" "$red" "$pat" "$normal" >&2
+	fi
+	total=$((total + n))
+    done
+    # Each entry is a mount; a great many slow the sandbox's start.
+    if [ "$total" -gt 2000 ]; then
+	echo "--ro: $total read-only mounts; a pattern on a directory would need fewer." >&2
+    fi
+}
+
+# register_project DIR: refuse DIR as a project if a recorded project
+# contains it or is inside it (a repo in both would get two clones);
+# otherwise create the project's directory and store its path in
+# $project.  You must call it with the session's lock held (see
+# `lock_work_path`), so that no overlapping session starts meanwhile.
+#
+# DIR must be the `realpath`.
+register_project() {
+    local dir=$1 f other
+    for f in "$PROJECTS"/*/path; do
+	[ -f "$f" ] || continue
+	# Not $(<...): it would drop a final newline of the name.
+	IFS= read -r -d '' other <"$f"
+	other=${other%$'\n'}
+	[ "$other" = "$dir" ] && continue
+	case $dir/ in "$other"/*)
+	    die "$dir is inside the project $other: work there, or delete ${f%/path}." ;;
+	esac
+	case $other/ in "$dir"/*)
+	    die "$dir contains the project $other: work there, or delete ${f%/path}." ;;
+	esac
+    done
+    project=$(project_dir "$dir")
+    mkdir -p -- "$project" || exit 1
+    # Rewritten at each session: its time is the project's latest use.
+    printf '%s\n' "$dir" >"$project/path"
+}
+
+# migrate_old_layout DIR: move what an older version of ai kept for the
+# project DIR to $project: the clones from ~/AI/work and the private
+# copies from ~/AI/shadow, both at DIR's path relative to your home.
+# Remove this function, and its call, once all your projects have been
+# migrated.  Besides moving directories, it changes the "ai" remote of
+# your repos, and the origin of the clones (your repo's .git was seen
+# at /upstream/PATH.git, PATH relative to your home).
+#
+# DIR must be the `realpath`.
+migrate_old_layout() {
+    local dir=$1 old_work="$HOME/AI/work" old_shadow="$HOME/AI/shadow"
+    local g repo rel old new
+    local -a repos
+    [[ $dir == "$home"/* ]] || return 0    # nothing was kept elsewhere
+
+    # Shallowest first: moving a clone also moves the clones nested in
+    # it, which are then skipped.
+    mapfile -d '' -t repos < <(git_repos "$dir")
+    for g in "${repos[@]}"; do
+	repo=${g%/.git}
+	old="$old_work/${repo#"$home"/}"
+	rel=${repo#"$dir"}
+	rel=${rel#/}
+	new="$project/git${rel:+/$rel}"
+	if [ -d "$old/.git" ] && [ ! -e "$new" ]; then
+	    mkdir -p -- "$(dirname -- "$new")" || exit 1
+	    # -T: fail rather than move into an existing directory.
+	    mv -T -- "$old" "$new" || die "Could not move $old to $new."
+	    echo "Moved the clone of $(rel_to_pwd "$repo") to $(rel_to_home "$new")." >&2
+	    rmdir_up "$old_work" "$(dirname -- "${repo#"$home"/}")"
+	fi
+	# Also for the nested clones, moved with the one containing them.
+	[ -d "$new/.git" ] || continue
+	if [ "$(/usr/bin/git config --file "$g/config" remote.ai.url)" = "$old" ]; then
+	    check_plain_config "$g"
+	    /usr/bin/git config --file "$g/config" remote.ai.url "$new"
+	fi
+	# The clone's config is the AI's: check it first.  git config
+	# --file follows no include and runs nothing.
+	check_plain_config "$new/.git"
+	if [ "$(/usr/bin/git config --file "$new/.git/config" remote.origin.url)" \
+	       = "/upstream/${repo#"$home"/}.git" ]; then
+	    /usr/bin/git config --file "$new/.git/config" remote.origin.url \
+			 "/upstream${rel:+/$rel}"
+	fi
+    done
+
+    old="$old_shadow/${dir#"$home"/}"
+    new="$project/shadow"
+    if [ -d "$old" ] && [ ! -e "$new" ]; then
+	mv -T -- "$old" "$new" || die "Could not move $old to $new."
+	echo "Moved the private copies to $(rel_to_home "$new")." >&2
+	rmdir_up "$old_shadow" "$(dirname -- "${dir#"$home"/}")"
+    fi
+}
+
+# rmdir_up TOP REL: remove TOP/REL and its parents up to TOP included,
+# as long as they are empty.  Only along that path: elsewhere, empty
+# directories may be needed (an empty refs/ in a clone, say).
+rmdir_up() {
+    [ "$2" = . ] || (cd -- "$1" 2>/dev/null &&
+			 rmdir -p --ignore-fail-on-non-empty -- "$2" 2>/dev/null)
+    rmdir -- "$1" 2>/dev/null
+    return 0
+}
+
+# session_lock DIR: the lock file of the session working in DIR.
+session_lock() {
+    printf '%s/%s.session' "$LOCKDIR" "$(printf %s "$1" | sha256sum | cut -c1-16)"
+}
+
+# lock_work_path DIR: refuse to start when another session's work dir
+# is DIR, contains it or is inside it; otherwise register DIR.  The
+# lock stays held on file descriptor 9 until the script exits.
+# Each session holds a lock on a file in $LOCKDIR containing its work
+# dir, so an entry is active exactly as long as its session runs; the
+# global lock makes checking and registering atomic.
+#
+# DIR must be the `realpath`.
+lock_work_path() {
+    local dir=$1 f other
+    mkdir -p -- "$LOCKDIR" || exit 1
+    exec 8>"$LOCKDIR/global.lock"
+    flock 8 || die "Cannot lock $LOCKDIR."
+    for f in "$LOCKDIR"/*.session; do
+	[ -e "$f" ] || continue
+	if flock -n "$f" true; then
+	    rm -f -- "$f"          # nobody holds it: a finished session
+	    continue
+	fi
+	# Not $(<...): it would drop a final newline of the name.
+	IFS= read -r -d '' other <"$f"
+	other=${other%$'\n'}
+	[ "$other" = "$dir" ] && die "A session is running in $dir."
+	case $dir/ in "$other"/*)
+	    die "Another session works in $other, which contains $dir." ;;
+	esac
+	case $other/ in "$dir"/*)
+	    die "Another session works in $other, inside $dir." ;;
+	esac
+    done
+    # Held until the script exits: the kernel releases the lock with
+    # the file descriptor, whatever the reason the script ends.
+    exec 9>"$(session_lock "$dir")"
+    flock -n 9 || die "Another session is using $dir."
+    printf '%s\n' "$dir" >&9
+    exec 8>&-                      # release the global lock
+}
+
+# lock_home MODE: take the lock of the agent's base home, $AIHOME, in
+# MODE "shared" for a project session, which sees it as the lower layer
+# of its overlay, or "exclusive" for a session in it (without -w): a
+# lower layer must not change while it is mounted.  Held on file
+# descriptor 7 until the script exits.
+lock_home() {
+    mkdir -p -- "$LOCKDIR" || exit 1
+    exec 7>"$LOCKDIR/home.lock"
+    if [ "$1" = shared ]; then
+	flock -n -s 7 ||
+	    die "A session in the agent's home (ai without -w) is running: end it first."
+    else
+	flock -n -x 7 ||
+	    die "Project sessions are running, and the agent's home must not change under them: end them first."
+    fi
+}
+
+# find_project: set $dir to the project containing the current
+# directory, if any.  (Not output: $(...) would drop a final newline of
+# its name.)
+find_project() {
+    local d
+    d=$(realpath -e -- . && echo .) || return 1
+    d=${d%$'\n.'}
+    while [ ! -f "$(project_dir "$d")/path" ]; do
+	[ "$d" = / ] && return 1
+	d=${d%/*}
+	d=${d:-/}
+    done
+    dir=$d
+}
+
+# show_home_layer LAYER: sum up the changes in LAYER, a project's layer
+# of the agent's home, if any.  Overlayfs records deletions as whiteouts:
+# character devices.
+show_home_layer() {
+    local layer=$1 summary
+    # 2>/dev/null: the agent may leave unreadable directories.
+    summary=$(find "$layer" -mindepth 1 \( -type c -printf 'd %P\0' -o \
+		   ! -type d -printf 'f %P\0' \) 2>/dev/null | summarize_home)
+    [ -n "$summary" ] || return 0
+    echo "Home layer: $(du -sh -- "$layer" 2>/dev/null | cut -f1), changes to the agent's home:"
+    printf '%s\n' "$summary"
+    ! grep -q '^! ' <<<"$summary" ||
+	echo "!: can run code, or steer the agent, in its later sessions."
+}
+
+# show_status [DIR]: what ai keeps for the project containing the current
+# directory (the project root may be a super-directory), if any.  The
+# branch names and paths it shows go through `safe`: they come from the
+# agent.
+show_status() {
+    local dir project lock g copy rel repo heads line sha name n p size
+    local -a clones copies expr
+    unmerged=0
+    if [ $# -gt 0 ]; then
+	dir=$1
+    else
+	find_project ||
+	    die "No project here: ai -w makes the current directory one."
+    fi
+    project=$(project_dir "$dir")
+    if [ -d "$dir" ]; then
+	echo "Project: $(rel_to_home "$dir")"
+    else
+	echo "Project: $(rel_to_home "$dir") (gone)"
+    fi
+    # 2>/dev/null: overlayfs leaves its work directory unreadable.
+    echo "Kept in: $(rel_to_home "$project") ($(du -sh -- "$project" 2>/dev/null | cut -f1))"
+    lock=$(session_lock "$dir")
+    if [ -e "$lock" ] && ! flock -n "$lock" true; then
+	echo "Session: running since $(date -r "$lock" '+%F %T')"
+    else
+	echo "Session: none"
+    fi
+
+    # The clones' branches, from your repos: ls-remote, like fetch, runs
+    # no code from the clone.  Never run Git inside the clones.
+    mapfile -d '' -t clones < <(git_repos "$project/git" 2>/dev/null)
+    for g in "${clones[@]}"; do
+	copy=${g%/.git}
+	rel=${copy#"$project/git"}
+	rel=${rel#/}
+	repo="$dir${rel:+/$rel}"
+	rel=$(safe "${rel:-.}")         # for display only from here on
+	if [ ! -d "$repo/.git" ]; then
+	    printf "Repo %s%s%s: gone from the project (its clone is kept)\n" \
+		   "$red" "$rel" "$normal"
+	    # The clone may hold the only copy of the agent's commits.
+	    unmerged=$((unmerged + 1))
+	    continue
+	fi
+	if ! heads=$(git -C "$repo" ls-remote --heads -- "$copy" 2>/dev/null); then
+	    printf "Repo %s%s%s: cannot read its clone\n" \
+		   "$red" "$rel" "$normal"
+	    continue
+	fi
+	n=0
+	while IFS=$'\t' read -r sha name; do
+	    # Git gives a null ID for the refs it finds invalid.
+	    [[ $sha =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ && $sha == *[1-9a-f]* ]] ||
+		continue
+	    name=$(safe "ai/${name#refs/heads/}")
+	    if ! git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null; then
+		line="new commits, not fetched yet (git fetch ai)"
+	    else
+		line=$(git -C "$repo" rev-list --count "$sha" --not --branches --)
+		[ "$line" -gt 0 ] || continue
+		[ "$line" -eq 1 ] && line="1 commit" || line="$line commits"
+		line="$line not in your branches"
+	    fi
+	    [ $((n++)) -eq 0 ] &&
+		printf "Repo %s%s%s:\n" "$red" "$rel" "$normal"
+	    echo "  $name: $line"
+	    unmerged=$((unmerged + 1))
+	done <<<"$heads"
+	[ "$n" -eq 0 ] && printf "Repo %s%s%s: nothing left to merge\n" \
+				 "$red" "$rel" "$normal"
+    done
+
+    show_home_layer "$project/home"
+
+    # The private copies: at their path in the project, within shadow/.
+    for n in "${PRIVATE[@]}"; do
+	expr+=(-o -name "$n")
+    done
+    mapfile -d '' -t copies < <(
+	find "$project/shadow" -mindepth 1 \( "${expr[@]:1}" \) -type d -prune -print0 \
+	     2>/dev/null | LC_ALL=C sort -z
+    )
+    [ ${#copies[@]} -gt 0 ] && echo "Private copies:"
+    for p in "${copies[@]}"; do
+	rel=${p#"$project/shadow/"}
+	size=$(du -sh -- "$p" | cut -f1)
+	# Unused: no such directory, nor will a tool create it (PRIVATE_IF).
+	if [ ! -e "$dir/$rel" ] &&
+	       ! { [ -n "${PRIVATE_IF[$rel]}" ] && [ -e "$dir/${PRIVATE_IF[$rel]}" ]; }; then
+	    size="$size, unused: no $(safe "$rel") in the project"
+	fi
+	echo "  $(safe "$rel"): $size"
+    done
+}
+
+# agent_file PATH: set $rel to PATH, a file of the agent's home
+# (~/.bashrc, .bashrc), relative to the home.  (Not output: $(...)
+# would drop a final newline of the name.)
+agent_file() {
+    local p=$1
+    case $p in
+	"~/"*)     p=${p#"~/"} ;;
+	"$HOME"/*) p=${p#"$HOME"/} ;;
+	/*)        die "$p is not in the agent's home." ;;
+    esac
+    p=${p#./}
+    p=${p%/}
+    [[ -n $p && $p != . && /$p/ != */../* ]] ||
+	die "Not a file of the agent's home: $1"
+    rel=$p
+}
+
+# under DIR PATH: true if PATH, its symlinks resolved, is DIR (a
+# `realpath`) or in it.
+under() {
+    local real
+    real=$(realpath -m -- "$2") || return 1
+    [[ $real == "$1" || $real == "$1"/* ]]
+}
+
+# is_whiteout PATH: true if PATH, in a layer, records a deletion.
+is_whiteout() {
+    [ -c "$1" ] && [ "$(stat -c %t:%T -- "$1")" = 0:0 ]
+}
+
+# opaque_dirs LAYER REL: the directories that the layer LAYER marks
+# opaque among those leading to REL, and in REL: they replace the base's
+# directory as a whole, since the agent deleted it, then created it
+# again.  Promoting part of one would mix the two versions.
+opaque_dirs() {
+    python3 -I - "$1" "$2" <<'EOF'
+import os, sys
+layer, rel = sys.argv[1], sys.argv[2]
+
+def opaque(d):
+    try:
+        return os.getxattr(d, "user.overlay.opaque", follow_symlinks=False) == b"y"
+    except OSError:
+        return False
+
+parts = rel.split("/")
+dirs = [os.path.join(layer, *parts[:i]) for i in range(1, len(parts))]
+target = os.path.join(layer, rel)
+if os.path.isdir(target) and not os.path.islink(target):
+    dirs += [root for root, _, _ in os.walk(target)]
+for d in dirs:
+    if opaque(d):
+        print(d)
+EOF
+}
+
+# promote PATH...: make the project's version of each PATH of the agent's
+# home (a file, a symlink, a deletion, or a directory of them) the base
+# version, for every project, after showing the changes and asking.
+# Each is then dropped from the project's layer, which sees the base
+# version again.  Nothing may run meanwhile: the base home must not
+# change under a session, nor a project's layer.
+promote() {
+    local dir project layer base p rel src f t old
+    local -a ops=()
+    lock_home exclusive
+    find_project ||
+	die "No project here: run ai --promote in the project."
+    project=$(project_dir "$dir")
+    layer=$(realpath -e -- "$project/home" 2>/dev/null) ||
+	die "The agent's home has no changes in this project."
+    base=$(realpath -e -- "$AIHOME") || exit 1
+
+    for p; do
+	agent_file "$p"
+	src="$layer/$rel"
+	[ -e "$src" ] || [ -L "$src" ] ||
+	    die "~/$rel has no changes in this project (see ai --status)."
+	under "$layer" "$(dirname -- "$src")" ||
+	    die "~/$rel: its directory, in the project's layer, leads out of it."
+	[ -z "$(opaque_dirs "$layer" "$rel")" ] ||
+	    die "~/$rel: the project replaced a directory there as a whole (deleted, then created again), which can't be merged into the base home: copy what you need by hand."
+	if [ -d "$src" ] && [ ! -L "$src" ]; then
+	    mapfile -d '' -t -O "${#ops[@]}" ops < <(
+		find "$src" ! -type d -print0 | LC_ALL=C sort -z
+	    )
+	else
+	    ops+=("$src")
+	fi
+    done
+    for f in "${ops[@]}"; do
+	rel=${f#"$layer"/}
+	# A symlink planted in the base home must not lead the copy out.
+	under "$base" "$(dirname -- "$base/$rel")" ||
+	    die "~/AI/home/$rel: its directory leads out of the base home."
+	is_whiteout "$f" || [ -L "$f" ] || [ -f "$f" ] ||
+	    die "~/$rel is not a file, a symlink or a deletion."
+    done
+    [ ${#ops[@]} -gt 0 ] || die "Nothing to promote."
+
+    for f in "${ops[@]}"; do
+	rel=${f#"$layer"/}
+	t="$base/$rel"
+	if is_whiteout "$f"; then
+	    echo "Delete ~/$(safe "$rel")"
+	elif [ -L "$f" ]; then
+	    old=$(readlink -- "$f" && echo .)
+	    echo "Symlink ~/$(safe "$rel") → $(safe "${old%$'\n.'}")"
+	else
+	    old=/dev/null
+	    [ -f "$t" ] && [ ! -L "$t" ] && old=$t
+	    diff -u --label "base ~/$rel" --label "project ~/$rel" -- "$old" "$f"
+	fi
+    done | safe_text
+    confirm "Make this the base version, for every project?" || exit 1
+
+    for f in "${ops[@]}"; do
+	rel=${f#"$layer"/}
+	t="$base/$rel"
+	# rm first: cp would write through a symlink there.
+	rm -rf -- "$t" || exit 1
+	if ! is_whiteout "$f"; then
+	    mkdir -p -- "$(dirname -- "$t")" &&
+		cp -P --preserve=mode,timestamps -- "$f" "$t" || exit 1
+	fi
+	rm -f -- "$f"
+	echo "Promoted ~/$(safe "$rel")."
+    done
+}
+
+# remove_tree DIR: delete DIR, a directory of ai's.  Make it writable
+# first: overlayfs leaves its work directory unreadable, and the agent
+# can do the same in its private copies.  chmod -R doesn't follow the
+# symlinks it meets, nor rm -r.
+remove_tree() {
+    chmod -R u+rwx -- "$1" 2>/dev/null
+    rm -rf -- "$1"
+}
+
+# reset_home: delete the project's layer of the agent's home, after
+# showing it and asking: the project then sees the base home as it is.
+reset_home() {
+    local dir project
+    find_project ||
+	die "No project here: run ai --reset in the project."
+    project=$(project_dir "$dir")
+    [ -e "$project/home" ] ||
+	die "The agent's home has no changes in this project."
+    # No session in the project meanwhile, until the script exits.
+    lock_work_path "$dir"
+    show_home_layer "$project/home"
+    confirm "Delete the project's changes to the agent's home (its history, memory, settings... there)?" ||
+	exit 1
+    remove_tree "$project/home.work"
+    remove_tree "$project/home"
+    echo "The agent's home in $(rel_to_home "$dir") is now the base home."
+}
+
+# forget: delete what ai keeps for the project, after showing it and
+# asking, and the "ai" remote of its repos.
+forget() {
+    local dir project g url
+    local -a repos
+    if [ $# -gt 0 ]; then
+	# -m: the directory may be gone.
+	dir=$(realpath -m -- "$1" && echo .) || exit 1
+	dir=${dir%$'\n.'}
+	[ -f "$(project_dir "$dir")/path" ] ||
+	    die "$1 is not a project (see ai --list)."
+    else
+	find_project ||
+	    die "No project here: run ai --forget in the project, or give its directory."
+    fi
+    project=$(project_dir "$dir")
+    show_status "$dir"          # sets $unmerged
+    # No session in the project meanwhile, until the script exits.
+    lock_work_path "$dir"
+    if [ "$unmerged" -gt 0 ]; then
+	echo "The agent's commits listed above are in no branch of yours, nor, for a repo" >&2
+	echo "that is gone, anywhere but in its clone: deleting the clones and the ai" >&2
+	echo "remote loses them.  Fetch and merge them first, or make branches of them" >&2
+	echo "(git branch NAME ai/BRANCH, after git fetch ai)." >&2
+    fi
+    confirm "Delete $(rel_to_home "$project"), and the ai remote of the project's repos?" ||
+	exit 1
+
+    # Only the remotes leading to this project's clones.
+    mapfile -d '' -t repos < <(git_repos "$dir" 2>/dev/null)
+    for g in "${repos[@]}"; do
+	url=$(/usr/bin/git config --file "$g/config" remote.ai.url)
+	case $url in
+	    "$project/git"|"$project/git"/*)
+		check_plain_config "$g"
+		# Not "git remote remove": it runs the repo's
+		# reference-transaction hook, core.hooksPath or not (git
+		# 2.43).  The config written directly, the refs deleted by
+		# update-ref, which honours core.hooksPath.
+		/usr/bin/git config --file "$g/config" --remove-section remote.ai &&
+		    git -C "${g%/.git}" for-each-ref --format='delete %(refname)' \
+			refs/remotes/ai/ |
+			git -C "${g%/.git}" update-ref --stdin &&
+		    echo "Repo $(rel_to_pwd "${g%/.git}"): ai remote removed."
+		;;
+	esac
+    done
+    remove_tree "$project"
+    echo "Forgot $(rel_to_home "$dir")."
+}
+
+# list_projects: every project, with its size and the start of its
+# latest session (when its path file was last touched), noting those
+# with a session running and those whose directory is gone.
+list_projects() {
+    local f dir lock state size when width=0 i
+    local -a names=() rows=()
+    for f in "$PROJECTS"/*/path; do
+	[ -f "$f" ] || continue
+	IFS= read -r -d '' dir <"$f"
+	dir=${dir%$'\n'}
+	lock=$(session_lock "$dir")
+	if [ ! -d "$dir" ]; then
+	    state="gone: ai --forget $(rel_to_home "$dir")"
+	elif [ -e "$lock" ] && ! flock -n "$lock" true; then
+	    state="session running"
+	else
+	    state=
+	fi
+	names+=("$(rel_to_home "$dir")")
+	# 2>/dev/null: overlayfs leaves its work directory unreadable.
+	rows+=("$(du -sh -- "${f%/path}" 2>/dev/null | cut -f1)	$(date -r "$f" '+%F %R')	$state")
+	[ ${#names[-1]} -le "$width" ] || width=${#names[-1]}
+    done
+    [ ${#names[@]} -gt 0 ] || echo "No projects yet: ai -w makes the current directory one."
+    for i in "${!names[@]}"; do
+	IFS=$'\t' read -r size when state <<<"${rows[i]}"
+	# Padded by hand: printf counts bytes, ${#...} characters.
+	printf '%s%*s  %5s  %s%s\n' "${names[i]}" $((width - ${#names[i]})) "" \
+	       "$size" "$when" "${state:+  $state}"
+    done
+    # The old layout: remove with migrate_old_layout.
+    if [ -d "$HOME/AI/work" ] || [ -d "$HOME/AI/shadow" ]; then
+	echo "Not migrated yet: the projects of ~/AI/work or ~/AI/shadow, moved at their next session."
+    fi
+}
+
+case $action in
+    status)  show_status; exit ;;
+    promote) promote "${promote_paths[@]}"; exit ;;
+    reset)   reset_home; exit ;;
+    forget)  forget ${forget_dir+"$forget_dir"}; exit ;;
+    list)    list_projects; exit ;;
+esac
+
+# --- Checks -------------------------------------------------------------
+
+[ -d "$AIHOME" ] ||
+    die "Create the directory '$AIHOME' with minimal configuration files."
+[ -x "$BWRAP" ] ||
+    die "bubblewrap is not installed (e.g. 'apt install bubblewrap')."
+"$BWRAP" --help 2>&1 | grep -q -- --overlay-src ||
+    die "bubblewrap is too old: version 0.10 or later is needed (--overlay)."
+command -v slirp4netns >/dev/null ||
+    die "slirp4netns is not installed (e.g. 'apt install slirp4netns')."
+command -v findmnt >/dev/null && command -v flock >/dev/null ||
+    die "findmnt or flock is missing (e.g. 'apt install util-linux')."
+command -v systemd-escape >/dev/null ||
+    die "systemd-escape is missing (it comes with systemd)."
+command -v awk >/dev/null ||
+    die "awk is not installed (e.g. 'apt install mawk')."
+NFT=$(PATH=$PATH:/usr/sbin:/sbin command -v nft) ||
+    die "nft is not installed (e.g. 'apt install nftables')."
+python3 -c 'import os; os.setns' 2>/dev/null ||
+    die "Python 3.12 or later is needed (os.setns)."
+python3 -c 'import seccomp' 2>/dev/null ||
+    die "libseccomp's Python bindings are missing (e.g. 'apt install python3-seccomp')."
+
+if [ -n "$ssh" ] && [ ! -r "$AI_SSH_KEY" ]; then
+    die "--ssh: create the agent's key first: ssh-keygen -t ed25519 -f '$AI_SSH_KEY' -C ai-agent"
+fi
+
+if [ -n "$work_path" ]; then
+    if [ "$work_path" = / ]; then
+	die "Refusing to expose the whole file system."
+    fi
+    case $home/ in
+	"$work_path"/*)
+	    die "Refusing to expose your whole home directory ($work_path)." ;;
+    esac
+    case $work_path/ in
+	"$home"/.*)
+	    die "Refusing to expose configuration files ($work_path)." ;;
+    esac
+    # Where ai's own files are, wherever your configuration put them.
+    for p in "$AIHOME" "$PROJECTS" "$LOCKDIR" "$AI_LOG" "$AI_CONFIG" "$AI_SSH_KEY"; do
+	overlaps "$work_path" "$p" &&
+	    die "Refusing to expose the sandbox's own files ($p)."
+    done
+    for p in "${FORBID_WORK[@]}"; do
+	overlaps "$work_path" "$p" &&
+	    die "Refusing to expose $p (FORBID_WORK)."
+    done
+
+    # The home lock first: a session refused for it changes nothing.
+    lock_home shared
+    lock_work_path "$work_path"
+    register_project "$work_path"
+    migrate_old_layout "$work_path"
+else
+    [ ${#read_only[@]} -eq 0 ] ||
+	die "--ro needs -w: the patterns are in the work directory."
+    lock_home exclusive
+fi
+
+# What the sandbox doesn't see of the work dir, as find tests: each .git
+# (replaced by a clone) and the directories protect_tool_files replaces
+# by private copies, which it records in $shadowed.  The checks on the
+# work dir skip them: hard links or sockets in a shadowed .venv, say,
+# don't matter.
+hidden=(-name .git)
+shadowed=()
+# The paths read-only in the sandbox, from protect_read_only (--ro) and
+# protect_tool_files ($READONLY).
+ro_paths=()
+
+# --- Temporary files (removed on exit) ----------------------------------
+
+tmp=$(mktemp -d -t ai.XXXXXXXX) || exit 1
+# `slirp` will hold (see below) the process ID of the background job
+# that runs slirp4netns, so the EXIT trap knows what to kill.
+slirp=
+agent_pid=
+watch_pid=        # inotifywait, watching the work dir for new tool files
+watch_reader=     # the function reporting what it sees
+agent_events_pid= # watch_agent_events, reading the agent's events
+
+cleanup() {
+    local links triggers home_all home_warn p
+    if [ -n "$slirp" ]; then
+	kill "$slirp" 2>/dev/null
+	wait "$slirp" 2>/dev/null       # it stops slirp4netns and reaps it
+    fi
+    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
+    if [ -n "$watch_pid" ]; then
+	kill "$watch_pid" 2>/dev/null
+	wait "$watch_reader" 2>/dev/null   # it ends with inotifywait's output
+    fi
+    if [ -n "$agent_events_pid" ]; then
+	# Without ai's end, the reader shows what is left in the pipe, then
+	# sees its end: the hooks went with the sandbox.  Unless something
+	# still holds it, after a signal: then it is stopped.
+	exec 12>&-
+	for ((p = 0; p < 40; p++)); do
+	    kill -0 "$agent_events_pid" 2>/dev/null || break
+	    sleep 0.05
+	done
+	kill "$agent_events_pid" 2>/dev/null
+	wait "$agent_events_pid" 2>/dev/null
+    fi
+    # Mount points created in your tree for absent PRIVATE entries.
+    if [ -f "$tmp/created" ]; then
+	while IFS= read -r -d '' p; do
+	    rmdir -- "$p" 2>/dev/null
+	done <"$tmp/created"
+    fi
+    # The snapshots exist only once the sandbox was about to start.
+    if [ -f "$tmp/symlinks.before" ] && [ -f "$tmp/triggers.before" ]; then
+	links=$(new_since "$tmp/symlinks.before" outside_symlinks "$work_path" |
+		    tr '\0' '\n')
+	triggers=$(new_triggers)
+    fi
+    # The changes to the agent's home: all of them on the terminal, only
+    # those that can run code or steer the agent in the log.
+    if [ -f "$tmp/home.before" ]; then
+	home_changes >"$tmp/home.changes"
+	home_all=$(summarize_home <"$tmp/home.changes")
+	home_warn=$(summarize_home triggers <"$tmp/home.changes")
+    fi
+    if [ -n "$links$triggers$home_warn" ]; then
+	session_report "$home_warn" >>"$AI_LOG"
+    fi
+    if [ -n "$links$triggers$home_all" ]; then
+	session_report "$home_all" >&2
+    fi
+    rm -rf -- "$tmp"
+}
+# session_report HOME: the report at exit on the session: the $links
+# and $triggers of cleanup, and HOME, a summary of the changes to the
+# agent's home.
+session_report() {
+    echo "$(date '+%F %T') Session in ${work_path:-$AIHOME}:"
+    if [ -n "$links" ]; then
+	echo "New symlinks out of the work dir (don't follow them blindly):"
+	indent <<<"$links"
+    fi
+    if [ -n "$triggers" ]; then
+	echo "New or changed files that can run code on the host (review before"
+	echo "entering these directories, opening them in an editor or running"
+	echo "Git, npm, Cargo... there):"
+	indent <<<"$triggers"
+    fi
+    [ -n "$1" ] || return 0
+    if [ -n "$work_path" ]; then
+	echo "Changed in the agent's home, in this project only (in $(rel_to_home "$project/home")):"
+    else
+	echo "Changed in the agent's base home, seen by every project (in $(rel_to_home "$AIHOME")):"
+    fi
+    printf '%s\n' "$1"
+    ! grep -q '^! ' <<<"$1" ||
+	echo "!: can run code, or steer the agent, in its later sessions."
+    [ -z "$work_path" ] ||
+	echo "Once reviewed, ai --promote PATH in the project makes one the base version."
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkfifo "$tmp/info" "$tmp/block" "$tmp/ready" "$tmp/notify" || exit 1
+# slirp4netns provides a DNS forwarder at 10.0.2.3.
+printf 'nameserver 10.0.2.3\n' >"$tmp/resolv.conf"
+
+getent passwd "$(id -u)" >"$tmp/passwd"
+getent group "$(id -g)" >"$tmp/group"
+printf 'passwd: files\ngroup: files\nhosts: files dns\n' >"$tmp/nsswitch.conf"
+
+# A seccomp filter for the sandbox: block kernel interfaces programs
+# can do without, and that have a long record of exploited bugs.  The
+# filter only covers 64-bit system calls: 32-bit ones (i386, x32) kill
+# the process.
+python3 -I - "$tmp/seccomp.bpf" <<'EOF' || die "Could not build the seccomp filter."
+import errno, sys
+import seccomp
+
+f = seccomp.SyscallFilter(seccomp.ALLOW)
+
+def deny(err, *names, args=()):
+    for name in names:
+        try:
+            f.add_rule(seccomp.ERRNO(err), name, *args)
+        except (OSError, RuntimeError, ValueError):
+            pass                        # not on this architecture
+
+# Programs fall back to classic I/O when io_uring is missing.
+deny(errno.ENOSYS, "io_uring_setup", "io_uring_enter", "io_uring_register")
+deny(errno.EPERM, "bpf", "userfaultfd", "perf_event_open",
+     "keyctl", "add_key", "request_key")
+# Refused anyway without privileges: no need to reach that code.
+deny(errno.EPERM, "mount", "umount2", "pivot_root", "mount_setattr",
+     "move_mount", "open_tree", "fsopen", "fsconfig", "fsmount", "fspick")
+# Typing into the terminal (TIOCSTI) or the Linux console (TIOCLINUX).
+for request in (0x5412, 0x541C):
+    deny(errno.EPERM, "ioctl",
+         args=(seccomp.Arg(1, seccomp.MASKED_EQ, 0xFFFFFFFF, request),))
+# Socket families: only Unix, IPv4, IPv6 and netlink (name resolution).
+# The kernel only reads the low 32 bits of the family, hence the final
+# rule: it also catches values with high bits set.
+allowed = {1, 2, 10, 16}
+for family in range(64):
+    if family not in allowed:
+        deny(errno.EAFNOSUPPORT, "socket",
+             args=(seccomp.Arg(0, seccomp.EQ, family),))
+deny(errno.EAFNOSUPPORT, "socket", args=(seccomp.Arg(0, seccomp.GE, 64),))
+
+with open(sys.argv[1], "wb") as out:
+    f.export_bpf(out)
+EOF
+
+if [ -n "$ssh" ]; then
+    # A private agent holding only the AI's key; it dies with the script.
+    agent_sock="$tmp/agent.sock"
+    agent_pid=$(ssh-agent -s -a "$agent_sock" 7>&- 9>&- |
+		    sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
+    [ -n "$agent_pid" ] || die "--ssh: could not start ssh-agent."
+
+    host_opts=()
+    for h in "${AI_SSH_HOSTS[@]}"; do
+	host_opts+=(-h "$h")
+    done
+    SSH_AUTH_SOCK=$agent_sock \
+	ssh-add -q "${host_opts[@]}" "$AI_SSH_KEY" </dev/tty ||
+	die "--ssh: could not load $AI_SSH_KEY."
+    unset host_opts
+fi
+
+# --- Sandbox ------------------------------------------------------------
+
+if [ -n "$work_path" ]; then
+    # The base home read-only, under the project's own changes.  The
+    # work directory must be on the same file system as the changes.
+    mkdir -p -- "$project/home" "$project/home.work" || exit 1
+    home_args=(
+	--overlay-src "$AIHOME"
+	--overlay "$project/home" "$project/home.work" "$HOME"
+    )
+else
+    home_args=(--bind "$AIHOME/" "$HOME/")
+fi
+
+args=(
+    --die-with-parent
+    --new-session
+    --unshare-all
+
+    --clearenv
+    --setenv PATH /usr/bin:/bin
+    --setenv TERM "$TERM"
+    --setenv LANG "${LANG:-C.UTF-8}"
+
+    --dev /dev
+    --proc /proc
+    --tmpfs /tmp
+
+    --ro-bind /usr /usr
+    --ro-bind /lib /lib
+    --ro-bind-try /lib64 /lib64
+    --ro-bind /bin /bin
+    --ro-bind-try /var/lib/texmf /var/lib/texmf
+    --ro-bind-try /etc/alternatives /etc/alternatives
+    --ro-bind-try /etc/emacs/site-start.d /etc/emacs/site-start.d
+    --ro-bind "$tmp/resolv.conf" /etc/resolv.conf
+    --ro-bind /etc/hosts /etc/hosts
+    --ro-bind /etc/ssl /etc/ssl
+    --ro-bind "$tmp/passwd" /etc/passwd
+    --ro-bind "$tmp/group" /etc/group
+    --ro-bind-try /etc/localtime /etc/localtime
+    --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache
+    --ro-bind "$tmp/nsswitch.conf" /etc/nsswitch.conf
+    --unshare-user
+    # Forbid using `unshare -U` to gain full capabilities in a fresh
+    # namespace.
+    --disable-userns
+    "${home_args[@]}"
+    --ro-bind-try "$HOME/texmf" "$HOME/texmf"
+    --setenv HOME "$HOME"
+    --setenv USER "$USER"
+    # Keep the sandbox's Python bytecode out of the work dir.
+    --setenv PYTHONPYCACHEPREFIX "$HOME/.cache/pycache"
+    # The pipe of the agent's events (see watch_agent_events).
+    --bind "$tmp/notify" /run/ai/notify
+    --setenv AI_NOTIFY /run/ai/notify
+)
+
+if [ -n "$ssh" ]; then
+    args+=(
+	# Your known hosts, as the system's: a mount point in the agent's
+	# home would be a change to it (in each project's layer).
+	--ro-bind-try "$HOME/.ssh/known_hosts" /etc/ssh/ssh_known_hosts
+	--bind "$agent_sock" /run/ssh-agent.sock
+	--setenv SSH_AUTH_SOCK /run/ssh-agent.sock
+    )
+fi
+
+if [ -n "$work_path" ]; then
+    # A distinct path per work dir, so that tools keeping per-directory
+    # data (history, memory...) tell projects apart.  Mount outside
+    # $HOME: / is a tmpfs, so no mount point is left behind in $AIHOME.
+    case $work_path in
+	"$home"/*) work_mount="/work/${work_path#"$home"/}" ;;
+	*)         work_mount="/work-tmp$work_path" ;;
+    esac
+    args+=(
+	--bind "$work_path" "$work_mount"
+	--chdir "$work_mount"
+	# For the files of the base home, shared by all sessions, to tell
+	# a project session (e.g. in .bashrc: [ -n "$AI_PROJECT" ]).
+	--setenv AI_PROJECT "$work_mount"
+    )
+    # Before the other mounts in the work dir: a read-only bind of a
+    # directory would otherwise cover the clones and private copies
+    # mounted inside it, and expose what they hide.
+    [ ${#read_only[@]} -eq 0 ] ||
+	protect_read_only "$work_path" "$work_mount" "${read_only[@]}"
+    protect_repos "$work_path" "$work_mount"
+    protect_tool_files "$work_path" "$work_mount"
+
+    # The checks on what the sandbox will see of the work dir: after
+    # protect_tool_files, which says what it replaces.
+    for p in "${shadowed[@]}"; do
+	glob_escape p "$p"
+	hidden+=(-o -path "$p")
+    done
+    links=$(outside_hardlinks "$work_path")
+    if [ -n "$links" ]; then
+	echo "Hard-linked outside the work dir, or to read-only files in it (the sandbox could modify them through these):" >&2
+	indent <<<"$links" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+    mounts=$(inner_mounts "$work_path")
+    if [ -n "$mounts" ]; then
+	echo "File systems mounted inside the work dir (exposed too):" >&2
+	indent <<<"$mounts" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+    sockets=$(inner_sockets "$work_path")
+    if [ -n "$sockets" ]; then
+	echo "Unix sockets or named pipes in the work dir (the sandbox could talk to the programs behind them):" >&2
+	indent <<<"$sockets" >&2
+	confirm "Continue anyway?" || exit 1
+    fi
+
+    # Python on your machine would otherwise use the bytecode (.pyc) the
+    # agent can leave in __pycache__ directories next to the sources.
+    # A relative value (Python doesn't expand "~") is resolved against
+    # the directory Python runs in, possibly the work dir.
+    if [ -n "$(find "$work_path" \( "${hidden[@]}" \) -prune -o -name '*.py' -print -quit)" ]; then
+	case $PYTHONPYCACHEPREFIX in
+	    /*) pycache=$(realpath -m -- "$PYTHONPYCACHEPREFIX") ;;
+	    *)  pycache=$work_path ;;
+	esac
+	if inside "$pycache" "$work_path" || inside "$pycache" "$AIHOME" ||
+	       inside "$pycache" "$PROJECTS"; then
+	    echo "Warning: PYTHONPYCACHEPREFIX is not an absolute path outside the work dir and the agent's directories:" >&2
+	    echo "  Python on your machine would use the bytecode the agent leaves in __pycache__." >&2
+	    echo "  Set it in your shell profile, e.g. export PYTHONPYCACHEPREFIX=\"\$HOME/.cache/pycache\"" >&2
+	fi
+    fi
+
+    # Snapshots for the checks at exit, taken after protect_repos, whose
+    # changes to the repos' config must not be reported.
+    outside_symlinks "$work_path" | LC_ALL=C sort -z >"$tmp/symlinks.before"
+    host_triggers "$work_path" | LC_ALL=C sort -z >"$tmp/triggers.before"
+
+    # Report new tool files as they appear, not only at exit.
+    if command -v inotifywait >/dev/null; then
+	start_watch "$work_path"
+	command -v notify-send >/dev/null ||
+	    echo "notify-send is missing: new tool files are only logged (e.g. 'apt install libnotify-bin')." >&2
+    else
+	echo "inotifywait is missing: new tool files are only reported at exit (e.g. 'apt install inotify-tools')." >&2
+    fi
+else
+    # No work directory, e.g. to install packages or AI tools in $HOME.
+    echo "No work directory: the sandbox starts in the agent's home (-w to work here)." >&2
+    args+=(--chdir "$HOME")
+fi
+
+if [ ${#cmd[@]} -eq 0 ]; then
+    # Allocate a pseudo-terminal for bash (so one has job control with
+    # Ctrl-Z, fg, bg):
+    cmd=(script -qc 'bash -i' /dev/null)
+fi
+
+# --- Network ------------------------------------------------------------
+
+# slirp4netns rather than --share-net: sharing the host's network
+# namespace would let the sandbox reach services listening on the
+# host's localhost (databases, dev servers, CUPS...).
+#
+# Wait for bwrap to report the sandbox PID, then attach the network to
+# it.  Once slirp4netns says it's ready, write to the block pipe, which
+# releases bwrap.  If it stops before, kill the sandbox: bwrap would
+# otherwise wait forever.
+#
+# Both the firewall and slirp4netns must act from the user namespace
+# that owns the sandbox's network namespace, where they have the rights
+# to configure it.  bwrap moves the sandbox itself into a namespace
+# nested in that one, at a time we can't know.  JOIN_NS PID [net] CMD...
+# asks the kernel for the owner (ioctl NS_GET_USERNS on the network
+# namespace), joins it, and the network namespace too with "net", then
+# runs CMD, keeping your credentials.  Python's own file descriptors
+# aren't passed on to CMD.
+JOIN_NS='
+import fcntl, os, sys, time
+NS_GET_USERNS = 0xb701                  # linux/nsfs.h
+pid, where, *cmd = sys.argv[1:]
+# bwrap reports the PID before the sandbox has mapped your user in its
+# namespace: joining it earlier would give no rights there.  Once the
+# sandbox is nested, its own namespace is mapped, its parent long before.
+for _ in range(500):
+    with open(f"/proc/{pid}/uid_map") as uid_map:
+        if uid_map.read().strip():
+            break
+    time.sleep(0.01)
+net = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
+os.setns(fcntl.ioctl(net, NS_GET_USERNS), os.CLONE_NEWUSER)
+if where == "net":
+    os.setns(net, os.CLONE_NEWNET)
+os.execvp(cmd[0], cmd)
+'
+(
+    fail() {
+	echo "ai: network setup failed: $*" >&2
+	# Otherwise bwrap waits on the block pipe forever.
+	[ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null
+	exit 1
+    }
+    exec 5<"$tmp/info"
+    while IFS= read -r line <&5; do
+	if [[ $line =~ \"child-pid\":\ *([0-9]+) ]]; then
+	    pid=${BASH_REMATCH[1]}
+	    break
+	fi
+    done
+    # bwrap goes on writing to the pipe: closing it would kill bwrap
+    # (SIGPIPE).  Read the rest, until bwrap closes it.
+    cat <&5 >/dev/null &
+    exec 5<&-
+    [ -n "$pid" ] || exit 1
+    # Firewall in the sandbox's network namespace, set as root of the
+    # namespace that owns it: the sandbox cannot change it.
+    python3 -I -c "$JOIN_NS" "$pid" net "$NFT" -f - <<<"$NFT_RULES" ||
+	fail "could not install the firewall rules"
+
+    python3 -I -c "$JOIN_NS" "$pid" user \
+	    slirp4netns --configure --mtu=65520 --disable-host-loopback \
+	    --enable-sandbox --enable-seccomp \
+	    --ready-fd=3 --netns-type=path "/proc/$pid/ns/net" tap0 \
+	    3>"$tmp/ready" >/dev/null \
+	    2> >(grep --line-buffered -v -E '^(sent tapfd=[0-9]+ for tap0|received tapfd=[0-9]+)$' >&2) &
+    child=$!
+    # The script's cleanup stops this subshell: stop slirp4netns too.
+    trap 'kill "$child" 2>/dev/null; wait "$child"; exit' TERM HUP
+    # slirp4netns writes "1" when ready; it closes the pipe if it fails.
+    read -r -n 1 _ <"$tmp/ready" || fail "slirp4netns stopped"
+    echo >"$tmp/block"
+    wait "$child"
+) 7>&- 9>&- &
+slirp=$!
+
+# --- Run ----------------------------------------------------------------
+
+# The agent's events.  ai holds the pipe open for writing (fd 12) for
+# the whole session, so that a hook never waits for a reader, and the
+# reader sees no end of file when a hook closes it: only once cleanup
+# closes it, after reading what is left.  Each open waits for the other.
+if [ -n "$work_path" ]; then
+    watch_agent_events "${work_path##*/}" <"$tmp/notify" 7>&- 9>&- &
+else
+    watch_agent_events "the agent's home" <"$tmp/notify" 7>&- 9>&- &
+fi
+agent_events_pid=$!
+exec 12>"$tmp/notify"
+
+# For the report at exit on the agent's home: in a project, its whole
+# layer (its changes); otherwise, the $HOME_TRIGGERS of the base home.
+if [ -n "$work_path" ]; then
+    home_watch=("$project/home")
+else
+    home_watch=("$AIHOME" "${HOME_TRIGGERS[@]}")
+fi
+home_snapshot "${home_watch[@]}" >"$tmp/home.before"
+
+# Your environment variables, as --setenv arguments that bwrap reads
+# from a pipe (--args 11), to keep them off its command line.  With
+# exec: a process substitution on bwrap's own line would also leave it
+# open as fd 63, into the sandbox.
+env_list=("${AI_ENV[@]}")
+[ -z "$work_path" ] || env_list+=("${AI_PROJECT_ENV[@]}")
+exec 11< <(for e in "${env_list[@]}"; do
+	       printf '%s\0' --setenv "${e%%=*}" "${e#*=}"
+	   done)
+
+# The block pipe is opened read-write: read-only would wait for a
+# writer, and the network subshell only opens it once slirp4netns is
+# ready.
+"$BWRAP" --info-fd 3 --block-fd 4 --seccomp 10 "${args[@]}" --args 11 "${cmd[@]}" \
+	 3>"$tmp/info" 4<>"$tmp/block" 10<"$tmp/seccomp.bpf" 7>&- 9>&- 12>&-
+exit $?
