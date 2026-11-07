@@ -655,7 +655,8 @@ without, and that have a long record of exploited bugs:
 | kernel keyrings (`keyctl`, `add_key`, `request_key`) | `EPERM` |
 | mounting (refused anyway without privileges)  | `EPERM`        |
 | typing into the terminal (`TIOCSTI`, `TIOCLINUX`) | `EPERM`    |
-| socket families other than Unix, IPv4, IPv6 and netlink | `EAFNOSUPPORT` |
+| `kcmp`, `name_to_handle_at` (programs do without) | `ENOSYS`    |
+| socket families other than Unix, IPv4, IPv6 and netlink (`socket`, `socketpair`) | `EAFNOSUPPORT` |
 
 32-bit system calls (i386 and x32) kill the process, so that they can't
 be used to get around the filter.

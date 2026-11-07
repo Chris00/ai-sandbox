@@ -33,6 +33,7 @@ fake notify-send keeps your desktop quiet.
 | `test_session_end.py` | signals, colours on a terminal, mounts in the work dir, locales |
 | `test_python.py` | what is specific to Python: the configuration, the interpreter |
 | `test_reference.py` | the Python version against the bash one |
+| `test_seccomp.py` | the seccomp filter, applied to a process here |
 | `test_harness.py` | the fake sandbox itself |
 
 `ai` runs on a terminal of its own, under `session_leader.py`, which

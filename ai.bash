@@ -1946,15 +1946,20 @@ deny(errno.EPERM, "mount", "umount2", "pivot_root", "mount_setattr",
 for request in (0x5412, 0x541C):
     deny(errno.EPERM, "ioctl",
          args=(seccomp.Arg(1, seccomp.MASKED_EQ, 0xFFFFFFFF, request),))
-# Socket families: only Unix, IPv4, IPv6 and netlink (name resolution).
-# The kernel only reads the low 32 bits of the family, hence the final
-# rule: it also catches values with high bits set.
+# Comparing the files of two processes, and file handles: of little use
+# to programs, which do without, but code they can reach.
+deny(errno.ENOSYS, "kcmp", "name_to_handle_at")
+# Socket families, for socket and socketpair: only Unix, IPv4, IPv6 and
+# netlink (name resolution).  The kernel only reads the low 32 bits of
+# the family, hence the final rule: it also catches values with high
+# bits set.
 allowed = {1, 2, 10, 16}
-for family in range(64):
-    if family not in allowed:
-        deny(errno.EAFNOSUPPORT, "socket",
-             args=(seccomp.Arg(0, seccomp.EQ, family),))
-deny(errno.EAFNOSUPPORT, "socket", args=(seccomp.Arg(0, seccomp.GE, 64),))
+for call in ("socket", "socketpair"):
+    for family in range(64):
+        if family not in allowed:
+            deny(errno.EAFNOSUPPORT, call,
+                 args=(seccomp.Arg(0, seccomp.EQ, family),))
+    deny(errno.EAFNOSUPPORT, call, args=(seccomp.Arg(0, seccomp.GE, 64),))
 
 with open(sys.argv[1], "wb") as out:
     f.export_bpf(out)
