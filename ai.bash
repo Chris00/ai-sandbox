@@ -1960,6 +1960,12 @@ for call in ("socket", "socketpair"):
             deny(errno.EAFNOSUPPORT, call,
                  args=(seccomp.Arg(0, seccomp.EQ, family),))
     deny(errno.EAFNOSUPPORT, call, args=(seccomp.Arg(0, seccomp.GE, 64),))
+# Of netlink, only the routing protocol (NETLINK_ROUTE, 0), which name
+# resolution needs: the others (netfilter, crypto, audit, uevents, socket
+# diagnostics...) are kernel code programs do without.  EPROTONOSUPPORT,
+# as for a protocol the kernel lacks.  Any high bit makes it not 0.
+deny(errno.EPROTONOSUPPORT, "socket",
+     args=(seccomp.Arg(0, seccomp.EQ, 16), seccomp.Arg(2, seccomp.NE, 0)))
 
 with open(sys.argv[1], "wb") as out:
     f.export_bpf(out)

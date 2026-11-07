@@ -657,12 +657,16 @@ without, and that have a long record of exploited bugs:
 | typing into the terminal (`TIOCSTI`, `TIOCLINUX`) | `EPERM`    |
 | `kcmp`, `name_to_handle_at` (programs do without) | `ENOSYS`    |
 | socket families other than Unix, IPv4, IPv6 and netlink (`socket`, `socketpair`) | `EAFNOSUPPORT` |
+| netlink protocols other than routing (`NETLINK_ROUTE`) | `EPROTONOSUPPORT` |
 
 32-bit system calls (i386 and x32) kill the process, so that they can't
 be used to get around the filter.
 
 As a result, profilers based on `perf_event_open` and 32-bit programs
-don't work in the sandbox. If a tool needs one of the blocked calls,
+don't work in the sandbox, nor do `ss` (socket diagnostics), `udevadm
+monitor` (device events), `iw`, `ethtool` and `wg` (generic netlink),
+or `iotop` (task statistics). Audit messages, from `su` or `sudo` say,
+are dropped: libaudit takes the error for a kernel without audit. If a tool needs one of the blocked calls,
 remove it from the list in the script.
 
 To check that the filter is active, from inside the sandbox:

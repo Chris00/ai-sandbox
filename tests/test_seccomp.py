@@ -72,6 +72,9 @@ results = {
     "socket unix, high bits": call("socket", (1 << 32) | socket.AF_UNIX, socket.SOCK_STREAM, 0),
     "socket inet": call("socket", socket.AF_INET, socket.SOCK_STREAM, 0),
     "socket netlink route": call("socket", socket.AF_NETLINK, socket.SOCK_RAW, 0),
+    # NETLINK_SOCK_DIAG, for one; the kernel only reads the low 32 bits.
+    "socket netlink sock_diag": call("socket", socket.AF_NETLINK, socket.SOCK_RAW, 4),
+    "socket netlink, high bits": call("socket", socket.AF_NETLINK, socket.SOCK_RAW, 1 << 32),
 }
 print(json.dumps(results))
 '''
@@ -133,6 +136,13 @@ class Filter(AiTestCase):
         self.assertBlocked("socket packet", errno.EAFNOSUPPORT, control=False)
         # Some sandboxes refuse it already, as ai's does: not a control.
         self.assertBlocked("socket unix, high bits", errno.EAFNOSUPPORT, control=False)
+
+
+    def test_only_the_routing_netlink(self):
+        # Name resolution needs it (getaddrinfo, getifaddrs); nothing else.
+        self.assertAllowed("socket netlink route")
+        self.assertBlocked("socket netlink sock_diag", errno.EPROTONOSUPPORT)
+        self.assertBlocked("socket netlink, high bits", errno.EPROTONOSUPPORT)
 
 
 if __name__ == "__main__":
