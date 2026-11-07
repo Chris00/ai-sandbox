@@ -46,6 +46,13 @@ class Options(AiTestCase):
     def test_read_only_needs_a_work_dir(self):
         self.assertRefused(self.ai("--ro", "x"), "--ro needs -w")
 
+    def test_what_follows_promote_is_its_paths(self):
+        for name in ("--reset", "--help"):
+            with self.subTest(name=name):
+                r = self.ai("--promote", ".bashrc", name)
+                self.assertRefused(r, "run ai --promote in the project")
+                self.assertNotIn("Usage", r.out)
+
     def test_promote_needs_paths(self):
         self.assertRefused(self.ai("--promote"), "--promote needs the paths")
 

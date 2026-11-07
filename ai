@@ -2302,7 +2302,7 @@ def main(argv):
         die("Python 3.12 or later is needed (os.setns).")
     # --help and the commands on projects first: they need neither the
     # resource limits nor the checks.  Arguments after "--" belong to the
-    # command.
+    # command, those after --promote are its paths.
     action = None
     for arg in argv:
         if arg == "--":
@@ -2312,6 +2312,8 @@ def main(argv):
             return 0
         if arg in ("--status", "--promote", "--reset", "--forget", "--list"):
             action = arg[2:]
+            if action == "promote":
+                break
 
     env = os.environ
     if "HOME" not in env:

@@ -328,13 +328,14 @@ EOF
 
 # --help and the commands on projects first: they need neither the
 # resource limits nor the checks.  Arguments after "--" belong to the
-# command.
+# command, those after --promote are its paths.
 action=                    # status, promote, reset, forget or list
 for arg; do
     case $arg in
 	--) break ;;
 	-h|--help) usage; exit 0 ;;
-	--status|--promote|--reset|--forget|--list) action=${arg#--} ;;
+	--promote) action=promote; break ;;
+	--status|--reset|--forget|--list) action=${arg#--} ;;
     esac
 done
 unset arg
