@@ -1,6 +1,7 @@
 """What is specific to the Python version: its configuration, above all."""
 import os
 import subprocess
+import sys
 import unittest
 
 from harness import AI, IS_BASH, AiTestCase, STUBS
@@ -110,6 +111,23 @@ class Interpreter(AiTestCase):
             with self.subTest(args=args):
                 self.ai(*args, env=env)
                 self.assertFalse((self.outside / "pwned").exists())
+
+    def test_an_error_in_a_thread_is_shown_made_safe(self):
+        # Nothing makes one happen: load ai as a module and raise one, whose
+        # message has a name as it is (OSError's show theirs escaped).
+        code = ("import importlib.machinery, importlib.util, sys, threading\n"
+                "loader = importlib.machinery.SourceFileLoader('ai', sys.argv[1])\n"
+                "spec = importlib.util.spec_from_loader('ai', loader)\n"
+                "loader.exec_module(importlib.util.module_from_spec(spec))\n"
+                "def fail(): raise ValueError(sys.argv[2])\n"
+                "t = threading.Thread(target=fail)\n"
+                "t.start()\n"
+                "t.join()\n")
+        p = subprocess.run([sys.executable, "-I", "-c", code, AI, f"{self.work}/a\x1b[31mb"],
+                           capture_output=True, text=True, errors="replace")
+        self.assertIn("ai: internal error in a thread:", p.stderr, p)
+        self.assertIn(f"{self.work}/a?[31mb", p.stderr, p)
+        self.assertNotIn("\x1b", p.stderr, p)
 
     def test_a_closed_output_is_not_an_error_to_show(self):
         env = dict(self.environment(), AI_TEST_LOG=str(self.outside))

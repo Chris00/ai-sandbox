@@ -2395,6 +2395,22 @@ def logical_cwd():
 sys.stdout.reconfigure(line_buffering=True, **ENCODING)
 sys.stderr.reconfigure(line_buffering=True, **ENCODING)
 
+
+
+def show_thread_error(args):
+    """Show an error in a thread as main shows its own: made safe, since
+    what failed can be a name from the agent."""
+    if issubclass(args.exc_type, SystemExit):
+        return
+    text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+    try:
+        warn(f"ai: internal error in a thread:\n{safe_text(text)}")
+    except OSError:
+        pass                            # no terminal any more
+
+
+threading.excepthook = show_thread_error
+
 PWD = logical_cwd()
 if sys.stdout.isatty():
     RED, NORMAL = "\033[31m", "\033[0m"
