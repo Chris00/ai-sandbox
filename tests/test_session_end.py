@@ -1,4 +1,5 @@
 """How a session ends, what it shows on a terminal, and in which locale."""
+import contextlib
 import json
 import os
 import signal
@@ -25,7 +26,9 @@ class Signals(AiTestCase):
         # A terminal's signal reaches both.  The session itself runs on, as
         # in the real sandbox it dies with bwrap: tell it to.
         os.kill(ai, sig)
-        os.kill(bwrap, sig)
+        # The Python version may have stopped bwrap already.
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(bwrap, sig)
         (running.logdir / "stop").touch()
         r = running.wait()
         self.assertEqual(r.rc, code, repr(r))
