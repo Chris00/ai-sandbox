@@ -52,6 +52,13 @@ class Configuration(AiTestCase):
                 self.assertRefused(r, f"{name} in your configuration must be a")
                 self.assertNotIn("Traceback", r.err)
 
+    def test_a_misspelt_setting_is_refused(self):
+        self.config('FORBID_WORKS = [f"{HOME}/software"]\nmine = 1\nPath = None')
+        r = self.ai("-w")
+        self.assertRefused(r, "no such setting: FORBID_WORKS (")
+        self.assertNotIn("mine", r.err)
+        self.assertNotIn("Path", r.err)
+
     def test_an_environment_entry_cannot_smuggle_options(self):
         self.config(r'AI_ENV = ["A=1\0--bind\0/\0/host"]')
         self.assertRefused(self.ai("-w"), "NAME=value")

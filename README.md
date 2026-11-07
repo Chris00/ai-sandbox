@@ -748,7 +748,8 @@ FORBID_WORK += [f"{HOME}/Documents/taxes"]
 Use `+=` to add to a list: `=` replaces it, defaults included. The other
 settings of `default_settings` can be changed the same way. A setting of
 the wrong type, or an error in the file, stops `ai` with the line
-concerned.
+concerned; so does an unknown name in capitals, as a misspelt setting
+would otherwise do nothing: name your own variables in lowercase.
 The sandbox's environment is cleared, except for a few variables set by
 `ai` (`HOME`, `PATH`, `TERM`…); the variables of `AI_ENV` and
 `AI_PROJECT_ENV` come after them, so they can replace them. `ai` passes
