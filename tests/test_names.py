@@ -444,8 +444,8 @@ class Evasion(AiTestCase):
         bad = q("d\t")
         r = self.ai("-w", session=f'mkdir "$WORK"/.tmp; touch "$WORK"/.tmp/.envrc; '
                                   f'mv "$WORK"/.tmp "$WORK"/{bad}; {SETTLE}')
-        self.assertEqual(len(r.notifications), 2, r.notifications)
-        self.assertIn("d?/.envrc", r.notifications[-1][-1])
+        # .tmp/.envrc too, unless the move comes before inotifywait watches .tmp.
+        self.assertTrue(any("d?/.envrc" in n[-1] for n in r.notifications), r.notifications)
 
     def test_a_file_name_cannot_forge_a_notification(self):
         # One file, whose name looks like a second line of events.

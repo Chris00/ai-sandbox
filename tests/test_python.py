@@ -129,6 +129,18 @@ class Interpreter(AiTestCase):
         self.assertIn(f"{self.work}/a?[31mb", p.stderr, p)
         self.assertNotIn("\x1b", p.stderr, p)
 
+    def test_the_python_on_the_path_is_not_run(self):
+        # A virtual environment's, say: JOIN_NS runs with ai's own (PYTHON).
+        bin_dir = self.outside / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "python3"
+        fake.write_text(f"#!/bin/sh\ntouch {self.outside}/ran\nexit 1\n")
+        fake.chmod(0o755)
+        path = f"{bin_dir}:{self.environment()['PATH']}"
+        r = self.ai("-w", session="true", env=dict(PATH=path))
+        self.assertOk(r)
+        self.assertFalse((self.outside / "ran").exists())
+
     def test_a_closed_output_is_not_an_error_to_show(self):
         env = dict(self.environment(), AI_TEST_LOG=str(self.outside))
         reader = subprocess.run(
