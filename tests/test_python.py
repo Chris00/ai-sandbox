@@ -123,7 +123,8 @@ class Interpreter(AiTestCase):
                 "t = threading.Thread(target=fail)\n"
                 "t.start()\n"
                 "t.join()\n")
-        p = subprocess.run([sys.executable, "-I", "-c", code, AI, f"{self.work}/a\x1b[31mb"],
+        # -B: loading it as a module would leave its bytecode next to it.
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", code, AI, f"{self.work}/a\x1b[31mb"],
                            capture_output=True, text=True, errors="replace")
         self.assertIn("ai: internal error in a thread:", p.stderr, p)
         self.assertIn(f"{self.work}/a?[31mb", p.stderr, p)
