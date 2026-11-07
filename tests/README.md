@@ -78,4 +78,5 @@ paths, and compares what they do, byte for byte: exit status, output,
 log, notifications, the arguments of bwrap and the seccomp filter.  Only
 the temporary directory, the dates and the process IDs may differ.
 
-`stubs/python3` recognizes `JOIN_NS` by its text.
+`stubs/python3`, set as `PYTHON` in the configuration (the bash version
+finds it on the `PATH`), recognizes `JOIN_NS` by its text.

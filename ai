@@ -175,6 +175,9 @@ def default_settings(home):
         # The sandbox itself; changeable for the tests, which replace it
         # (see tests/README.md).
         BWRAP="/usr/bin/bwrap",
+        # The Python of JOIN_NS: this program's own, by default; changeable
+        # for the tests too.
+        PYTHON=sys.executable,
         # Firewall of the sandbox's network: no access to the local network.
         # 10.0.2.3 is slirp4netns's DNS forwarder; the rest of 10.0.0.0/8,
         # including the host behind 10.0.2.2, is blocked.
@@ -331,6 +334,7 @@ class Config:
     PROJECTS: str
     AI_SSH_KEY: str
     BWRAP: str
+    PYTHON: str
     NFT_RULES: str
     LOCKDIR: str
     AI_LOG: str
@@ -488,7 +492,8 @@ def enter_scope(limits, argv):
             "-p", "IOWeight=50",
             "-p", f"TasksMax={tasks}",
             "-p", "OOMPolicy=continue",
-            "--", os.path.realpath(__file__), *argv])
+            # The same Python, with the flags of the first line.
+            "--", sys.executable, "-I", "-X", "utf8", os.path.realpath(__file__), *argv])
     print("ai: no systemd user session: running WITHOUT resource limits.", file=sys.stderr)
 
 
@@ -1450,7 +1455,7 @@ class Session:
                 return
             # Firewall in the sandbox's network namespace, set as root of the
             # namespace that owns it: the sandbox cannot change it.
-            if subprocess.run(["python3", "-I", "-c", JOIN_NS, str(pid), "net",
+            if subprocess.run([self.cfg.PYTHON, "-I", "-c", JOIN_NS, str(pid), "net",
                                self.nft, "-f", "-"],
                               input=self.cfg.NFT_RULES.encode(**ENCODING)).returncode:
                 self.network_failed("could not install the firewall rules", pid)
@@ -1461,7 +1466,7 @@ class Session:
                 if self.network_ending:
                     return
                 self.slirp = subprocess.Popen(
-                    ["python3", "-I", "-c", JOIN_NS, str(pid), "user",
+                    [self.cfg.PYTHON, "-I", "-c", JOIN_NS, str(pid), "user",
                      "slirp4netns", "--configure", "--mtu=65520", "--disable-host-loopback",
                      "--enable-sandbox", "--enable-seccomp",
                      f"--ready-fd={ready_w}", "--netns-type=path", f"/proc/{pid}/ns/net", "tap0"],
@@ -1642,9 +1647,6 @@ def check_session_tools(cfg):
     nft = shutil.which("nft", path=f"{os.environ.get('PATH', '')}:/usr/sbin:/sbin")
     if not nft:
         die("nft is not installed (e.g. 'apt install nftables').")
-    if subprocess.run(["python3", "-c", "import os; os.setns"],
-                      stderr=subprocess.DEVNULL).returncode:
-        die("Python 3.12 or later is needed (os.setns).")
     try:
         import seccomp  # noqa: F401
     except ImportError:

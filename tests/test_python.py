@@ -9,7 +9,8 @@ from harness import AI, IS_BASH, AiTestCase, STUBS
 @unittest.skipIf(IS_BASH, "the bash version reads a configuration in bash")
 class Configuration(AiTestCase):
     def config(self, text):
-        self.write_config_text(f"BWRAP = {str(STUBS / 'bwrap')!r}\n{text}\n")
+        self.write_config_text(f"BWRAP = {str(STUBS / 'bwrap')!r}\n"
+                               f"PYTHON = {str(STUBS / 'python3')!r}\n{text}\n")
 
     def test_it_is_python(self):
         self.config('AI_ENV = [f"N={n}" for n in range(2)]\nREADONLY.append("mine")')
@@ -36,7 +37,7 @@ class Configuration(AiTestCase):
     def test_an_error_at_run_time_is_refused_with_its_line(self):
         self.config("\n\n1 / 0")
         r = self.ai("--list")
-        self.assertRefused(r, f"{self.config_path}, line 4: ZeroDivisionError")
+        self.assertRefused(r, f"{self.config_path}, line 5: ZeroDivisionError")
         self.assertNotIn("Traceback", r.err)
 
     def test_settings_of_the_wrong_type_are_refused(self):

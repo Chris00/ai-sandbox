@@ -2,7 +2,7 @@
 import os
 import unittest
 
-from harness import AI, AiTestCase
+from harness import AI, IS_BASH, AiTestCase
 
 
 class Options(AiTestCase):
@@ -87,9 +87,13 @@ class Limits(AiTestCase):
         for prop in ("MemoryMax=1G", "MemorySwapMax=2G", "CPUQuota=300%", "TasksMax=99"):
             self.assertIn(prop, args)
         # ai again, with the same arguments, in the scope.
-        sep = args.index("--")
-        self.assertEqual(args[sep + 1:][1:], ["-w", "--", "tool", "x y"])
-        self.assertEqual(os.path.basename(args[sep + 1]), AI.name)
+        command = args[args.index("--") + 1:]
+        if not IS_BASH:
+            # By the same Python, with the flags of the first line.
+            self.assertEqual(command[1:4], ["-I", "-X", "utf8"])
+            del command[:4]
+        self.assertEqual(command[1:], ["-w", "--", "tool", "x y"])
+        self.assertEqual(os.path.basename(command[0]), AI.name)
 
     def test_defaults(self):
         _, args = self.limits()

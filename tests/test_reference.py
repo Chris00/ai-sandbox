@@ -25,6 +25,8 @@ def normalize(text):
 class Reference(AiTestCase):
     def write_both_configs(self, add=None, **settings):
         settings.setdefault("BWRAP", str(STUBS / "bwrap"))
+        # Unused by the bash version, which runs python3 from the PATH.
+        settings.setdefault("PYTHON", str(STUBS / "python3"))
         for render, name in ((render_bash, "config"), (render_python, "config.py")):
             text = "".join(render(k, v, False) for k, v in settings.items())
             text += "".join(render(k, v, True) for k, v in (add or {}).items())

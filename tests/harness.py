@@ -300,6 +300,8 @@ class AiTestCase(unittest.TestCase):
         the lists of `add`, a dictionary, in the language it reads."""
         if self.fake_sandbox:
             settings.setdefault("BWRAP", str(STUBS / "bwrap"))
+            if not IS_BASH:             # which runs python3 from the PATH
+                settings.setdefault("PYTHON", str(STUBS / "python3"))
         render = render_bash if IS_BASH else render_python
         text = "".join(render(name, value, False) for name, value in settings.items())
         text += "".join(render(name, value, True) for name, value in (add or {}).items())
