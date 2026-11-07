@@ -428,11 +428,13 @@ def load_config(home):
             raise
         except BaseException as e:
             if isinstance(e, SyntaxError):
-                line = e.lineno
+                lines = [e.lineno]
             else:
-                line = [f.lineno for f in traceback.extract_tb(e.__traceback__)
-                        if f.filename == path][-1]
-            die(f"{path}, line {line}: {type(e).__name__}: {e}")
+                lines = [f.lineno for f in traceback.extract_tb(e.__traceback__)
+                         if f.filename == path]
+            # None when compiling it fails otherwise: too complex, say.
+            where = f"{path}, line {lines[-1]}" if lines and lines[-1] else path
+            die(f"{where}: {type(e).__name__}: {e}")
         # A misspelt setting would otherwise do nothing: FORBID_WORKS, say.
         unknown = sorted(name for name in namespace if re.fullmatch("[A-Z][A-Z0-9_]*", name)
                          and name not in settings and name != "HOME")

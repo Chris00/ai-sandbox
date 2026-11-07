@@ -40,6 +40,12 @@ class Configuration(AiTestCase):
         self.assertRefused(r, f"{self.config_path}, line 5: ZeroDivisionError")
         self.assertNotIn("Traceback", r.err)
 
+    def test_an_error_on_no_line_is_refused(self):
+        self.config("x = " + "-" * 100000 + "1")    # too complex to parse
+        r = self.ai("--list")
+        self.assertRefused(r, f"{self.config_path}: MemoryError")
+        self.assertNotIn("Traceback", r.err)
+
     def test_settings_of_the_wrong_type_are_refused(self):
         for text, name in (('READONLY = ".envrc"', "READONLY"),    # would be letters
                            ('PRIVATE = [1]', "PRIVATE"),
