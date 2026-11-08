@@ -474,6 +474,28 @@ plugin.  Rather install plugins in a session without `-w`, for all
 projects.
 
 
+### Settings the agent can't change
+
+The agent can change whatever its home holds, in a project at least:
+its instructions and settings there are only as good as its last
+session left them. For what must hold in every session, use `~/AI/etc`:
+each of its entries is mounted read-only at `/etc/NAME` in every
+sandbox, out of the agent's reach. Claude Code reads its managed
+settings and instructions from `/etc/claude-code`, and nothing
+overrides them:
+
+```sh
+mkdir -p ~/AI/etc/claude-code
+cd ~/AI/etc/claude-code
+echo 'Commit on a branch, and never push: I fetch your commits myself.' >CLAUDE.md
+echo '{ "permissions": { "deny": ["Bash(git push *)"] } }' >managed-settings.json
+```
+
+A rule like this one guards against the agent's mistakes; the sandbox
+itself is what stops it (here, `origin` is read-only in the sandbox).
+Changes take effect at the next session.
+
+
 ## Notifications from the agent
 
 An agent can tell you, with a desktop notification, that it has
@@ -793,6 +815,7 @@ drop what it asks. Write its settings in Python, then delete it.
 | `~/AI/home`          | the agent's home directory                       |
 | `~/AI/projects/`     | one directory per project (see below)            |
 | `~/AI/config.py`     | your configuration, optional (see [Configuration](#configuration)) |
+| `~/AI/etc/`          | your files for the sandbox's `/etc`, read-only there (see [Settings the agent can't change](#settings-the-agent-cant-change)) |
 | `~/AI/locks`         | the locks of the running sessions                |
 | `~/AI/warnings.log`  | warnings from the checks during the session and at exit, with their time |
 | `~/.ssh/id_ed25519_ai` | the agent's SSH key (`--ssh`)                  |

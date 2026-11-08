@@ -121,6 +121,14 @@ class Reference(AiTestCase):
             run("--status")
         self.compare(scenario)
 
+    def test_etc_files(self):
+        def scenario(run):
+            for name in ("claude-code", "b", "a b", "é", ".hidden"):
+                (self.home / "AI/etc" / name).mkdir(parents=True)
+            run("-w")
+            run()
+        self.compare(scenario)
+
     def test_many_read_only_entries(self):
         def scenario(run):
             for i in range(5):

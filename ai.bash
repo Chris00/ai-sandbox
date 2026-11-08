@@ -93,11 +93,16 @@ table inet ai {
 LOCKDIR="$HOME/AI/locks"
 # The warnings of the checks, with their time.
 AI_LOG="$HOME/AI/warnings.log"
+# Your files for the sandbox's /etc: each entry of this directory, if it
+# exists, is mounted read-only at /etc/NAME in every session, where the
+# agent can't change it.  Claude Code, for one, reads its managed
+# settings from /etc/claude-code, and they prevail over all others.
+AI_ETC="$HOME/AI/etc"
 
 # Directories never exposed: no work dir may be one of them, be in one
 # or contain one.  Besides these, ai refuses /, your whole home, its
-# hidden directories, and ai's own files: $AIHOME, $PROJECTS... and the
-# agent's SSH key.
+# hidden directories, and ai's own files: $AIHOME, $PROJECTS, $AI_ETC...
+# and the agent's SSH key.
 FORBID_WORK=("$HOME/Personal")
 
 # Files and directories in the work dir that make tools on the host run
@@ -1786,7 +1791,7 @@ if [ -n "$work_path" ]; then
 	    die "Refusing to expose configuration files ($work_path)." ;;
     esac
     # Where ai's own files are, wherever your configuration put them.
-    for p in "$AIHOME" "$PROJECTS" "$LOCKDIR" "$AI_LOG" "$AI_CONFIG" "$AI_SSH_KEY"; do
+    for p in "$AIHOME" "$PROJECTS" "$LOCKDIR" "$AI_LOG" "$AI_ETC" "$AI_CONFIG" "$AI_SSH_KEY"; do
 	overlaps "$work_path" "$p" &&
 	    die "Refusing to expose the sandbox's own files ($p)."
     done
@@ -2046,6 +2051,13 @@ args=(
     --bind "$tmp/notify" /run/ai/notify
     --setenv AI_NOTIFY /run/ai/notify
 )
+# Your files for /etc (see $AI_ETC), in the order of their bytes.
+if [ -d "$AI_ETC" ]; then
+    while IFS= read -r -d '' entry; do
+	args+=(--ro-bind "$AI_ETC/$entry" "/etc/$entry")
+    done < <(find -H "$AI_ETC" -mindepth 1 -maxdepth 1 -printf '%f\0' | LC_ALL=C sort -z)
+    unset entry
+fi
 
 if [ -n "$ssh" ]; then
     args+=(

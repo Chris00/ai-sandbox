@@ -24,6 +24,21 @@ class Isolation(AiTestCase):
         for source in r.bwrap.sources():
             self.assertTrue(source.startswith(allowed), source)
 
+    def test_your_etc_files_are_mounted_read_only(self):
+        etc = self.home / "AI/etc"
+        (etc / "claude-code").mkdir(parents=True)
+        (etc / "gitconfig").write_text("")
+        for args in ([], ["-w"]):
+            with self.subTest(args=args):
+                r = self.ai(*args)
+                mounts = [m for m in r.bwrap.mounts() if m[1].startswith(f"{etc}/")]
+                self.assertEqual(mounts, [("--ro-bind", f"{etc}/claude-code", "/etc/claude-code"),
+                                          ("--ro-bind", f"{etc}/gitconfig", "/etc/gitconfig")])
+
+    def test_no_etc_files_without_the_directory(self):
+        r = self.ai("-w")
+        self.assertFalse([s for s in r.bwrap.sources() if s.startswith(f"{self.home}/AI/etc")])
+
     def test_the_real_home_is_never_mounted(self):
         r = self.ai("-w")
         for source in r.bwrap.sources():

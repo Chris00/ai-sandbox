@@ -196,10 +196,15 @@ table inet ai {
         LOCKDIR=f"{home}/AI/locks",
         # The warnings of the checks, with their time.
         AI_LOG=f"{home}/AI/warnings.log",
+        # Your files for the sandbox's /etc: each entry of this directory, if
+        # it exists, is mounted read-only at /etc/NAME in every session, where
+        # the agent can't change it.  Claude Code, for one, reads its managed
+        # settings from /etc/claude-code, and they prevail over all others.
+        AI_ETC=f"{home}/AI/etc",
         # Directories never exposed: no work dir may be one of them, be in
         # one or contain one.  Besides these, ai refuses /, your whole home,
-        # its hidden directories, and ai's own files: AIHOME, PROJECTS... and
-        # the agent's SSH key.
+        # its hidden directories, and ai's own files: AIHOME, PROJECTS,
+        # AI_ETC... and the agent's SSH key.
         FORBID_WORK=[f"{home}/Personal"],
         # Files and directories in the work dir that make tools on the host
         # run code, often just by entering the directory, opening it in an
@@ -340,6 +345,7 @@ class Config:
     NFT_RULES: str
     LOCKDIR: str
     AI_LOG: str
+    AI_ETC: str
     FORBID_WORK: list
     PRIVATE: list
     READONLY: list
@@ -1677,7 +1683,8 @@ def check_work_path(cfg, work_path, home):
     if f"{work_path}/".startswith(f"{home}/."):
         die(f"Refusing to expose configuration files ({work_path}).")
     # Where ai's own files are, wherever your configuration put them.
-    for p in (cfg.AIHOME, cfg.PROJECTS, cfg.LOCKDIR, cfg.AI_LOG, *cfg.files, cfg.AI_SSH_KEY):
+    for p in (cfg.AIHOME, cfg.PROJECTS, cfg.LOCKDIR, cfg.AI_LOG, cfg.AI_ETC, *cfg.files,
+              cfg.AI_SSH_KEY):
         if overlaps(work_path, p):
             die(f"Refusing to expose the sandbox's own files ({p}).")
     for p in cfg.FORBID_WORK:
@@ -1719,7 +1726,7 @@ def confirm_warnings(work):
 
 def sandbox_args(session, env):
     """The arguments of bwrap, up to what depends on the work dir."""
-    tmp, home = session.tmp, os.environ["HOME"]
+    cfg, tmp, home = session.cfg, session.tmp, os.environ["HOME"]
     args = [
         "--die-with-parent",
         "--new-session",
@@ -1763,6 +1770,10 @@ def sandbox_args(session, env):
         "--bind", f"{tmp}/notify", "/run/ai/notify",
         "--setenv", "AI_NOTIFY", "/run/ai/notify",
     ]
+    # Your files for /etc (see AI_ETC), in the order of their bytes.
+    if os.path.isdir(cfg.AI_ETC):
+        for entry in sorted(os.listdir(cfg.AI_ETC), key=os.fsencode):
+            args += ["--ro-bind", f"{cfg.AI_ETC}/{entry}", f"/etc/{entry}"]
     if session.ssh:
         args += [
             # Your known hosts, as the system's: a mount point in the agent's

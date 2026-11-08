@@ -232,7 +232,7 @@ class Refused(AiTestCase):
 
     def test_ai_own_files(self):
         for d in (self.home / "AI", self.base, self.base / "sub", self.projects,
-                  self.projects / "sub", self.locks):
+                  self.projects / "sub", self.locks, self.home / "AI/etc"):
             with self.subTest(dir=d):
                 self.refused(d, "the sandbox's own files")
 
