@@ -149,7 +149,7 @@ HOME_TRIGGERS=(
     .npmrc .config/pip .pip .cargo/config .cargo/config.toml
     # Claude Code: hooks, permissions, instructions and its own program.
     .claude/settings.json .claude/settings.local.json .claude/CLAUDE.md
-    .claude/hooks .claude/commands .claude/agents .claude/skills
+    .claude/rules .claude/hooks .claude/commands .claude/agents .claude/skills
     .claude/plugins .claude/projects/*/memory .local/share/claude
     # Other agents' settings, with their hooks.
     .codex/config.toml .copilot/hooks .copilot/settings.json
@@ -183,6 +183,7 @@ HOME_IGNORE=(
 HOME_GROUPS=(
     .claude/.credentials.json           # Claude Code: your login, to promote?
     .claude/settings.json
+    .claude/rules/*                     # each file of instructions
     .claude/skills/synced/*             # a skill from claude.ai, before...
     .claude/skills/*                    # ...any other skill
     .claude/plugins/cache/*/*           # a plugin (cache/MARKETPLACE/PLUGIN)
