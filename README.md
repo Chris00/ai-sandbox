@@ -374,8 +374,8 @@ At exit, `ai` sums up the changes the session made to the agent's
 home, and marks with `!` those that make code run, or steer the agent,
 in its later sessions: shell profiles, `~/.local/bin`, Git's and SSH's
 configuration, package managers' settings, Claude Code's settings
-(hooks, permissions), its instructions (`CLAUDE.md`, the projects'
-memory) and its program. That list, `HOME_TRIGGERS`, can be extended
+(hooks, permissions), its instructions (`CLAUDE.md`, `rules/`, the
+projects' memory) and its program. That list, `HOME_TRIGGERS`, can be extended
 in your [configuration](#configuration). For example:
 
 ```
@@ -445,6 +445,22 @@ since the base home must not change under one. `ai` refuses a symlink
 of the base home that would lead the copy out of it, and a directory
 that the project deleted and created again, which replaces the base's
 as a whole: copy what you need from it by hand.
+
+To give the agent an instruction for every project from within one
+("never push", say), have it write the instruction in a file of its
+own in `~/.claude/rules/`, which Claude Code reads in every project,
+rather than in `~/.claude/CLAUDE.md`. The summary at exit shows each
+of these files apart, and promoting one copies it alone: promoting
+`CLAUDE.md` would copy the project's whole version, made from the base
+one as it was when the project first changed it, and so undo what
+changed in the base since. A line of the base `~/.claude/CLAUDE.md`
+can ask the agent to work this way:
+
+```markdown
+To change your instructions for all projects, write a new file in
+~/.claude/rules/, one per subject, and ask me to promote it with
+ai --promote.
+```
 
 *Remark.* A skill is a directory: Claude Code finds the skills in
 `~/.claude/skills/` at startup, so promoting the directory is

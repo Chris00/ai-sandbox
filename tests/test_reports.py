@@ -157,6 +157,12 @@ class HomeReport(AiTestCase):
         self.assertLess(err.index(".claude/skills/foo/"), err.index(".claude/plugins"))
         self.assertLess(err.index(".claude/plugins"), err.index("zzz.txt"))
 
+    def test_each_rule_is_shown_apart(self):
+        r = self.changed(".claude/rules/git.md", ".claude/rules/style.md")
+        self.assertIn("! .claude/rules/git.md\n", r.err)
+        self.assertIn("! .claude/rules/style.md\n", r.err)
+        self.assertIn(".claude/rules/git.md", self.warnings.read_text())
+
     def test_a_group_with_one_file_shows_it(self):
         r = self.changed(".claude/skills/foo/SKILL.md")
         self.assertIn("! .claude/skills/foo/SKILL.md\n", r.err)
