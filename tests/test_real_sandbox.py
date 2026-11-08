@@ -64,6 +64,18 @@ class RealSandbox(AiTestCase):
         self.assertOk(self.sandboxed("touch /etc/x"))
         self.assertDenied("test -e /etc/x")
 
+    def test_your_etc_files_are_read_only(self):
+        etc = self.home / "AI/etc/claude-code"
+        etc.mkdir(parents=True)
+        (etc / "CLAUDE.md").write_text("Never push.\n")
+        r = self.sandboxed("cat /etc/claude-code/CLAUDE.md")
+        self.assertOk(r)
+        self.assertEqual(r.out, "Never push.\n")
+        for script in ("echo x >>/etc/claude-code/CLAUDE.md", "touch /etc/claude-code/x",
+                       "mv /etc/claude-code /etc/y", "rm -r /etc/claude-code"):
+            self.assertDenied(script)
+        self.assertEqual(sorted(os.listdir(etc)), ["CLAUDE.md"])
+
     def test_the_host_filesystem_is_not_reachable_through_proc(self):
         # Each process seen has the sandbox's root, where $HOME is the agent's.
         secret = self.home / "secret"
