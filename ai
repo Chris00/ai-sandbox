@@ -388,7 +388,7 @@ def check_settings(settings):
         if field.name not in settings:
             continue
         value = settings[field.name]
-        if field.type is str or field.type == "str":
+        if field.type is str:
             if isinstance(value, os.PathLike):
                 value = settings[field.name] = os.fspath(value)
             good = isinstance(value, str)
@@ -405,7 +405,7 @@ def check_settings(settings):
         else:
             good = value is None or isinstance(value, (str, int))
         if not good:
-            kind = getattr(field.type, "__name__", str(field.type))
+            kind = field.type.__name__
             if kind == "object":
                 kind = "str or int"
             die(f"{field.name} in your configuration must be a {kind}, "
@@ -540,23 +540,23 @@ def die(message):
     raise Exit(1)
 
 
+def shown_from(path, base, mark):
+    """`path` to show: starting with `mark` if it is `base` or under it."""
+    if path == base:
+        return mark
+    if path.startswith(f"{base}/"):
+        return safe(f"{mark}/{path[len(base) + 1:]}")
+    return safe(path)
+
+
 def rel_to_pwd(path):
     """`path` to show, relative to the current directory if under it."""
-    if path == PWD:
-        return "."
-    if path.startswith(f"{PWD}/"):
-        return safe(f"./{path[len(PWD) + 1:]}")
-    return safe(path)
+    return shown_from(path, PWD, ".")
 
 
 def rel_to_home(path):
     """`path` to show, relative to your home if under it."""
-    home = os.environ["HOME"]
-    if path == home:
-        return "~"
-    if path.startswith(f"{home}/"):
-        return safe(f"~/{path[len(home) + 1:]}")
-    return safe(path)
+    return shown_from(path, os.environ["HOME"], "~")
 
 
 def glob_escape(path):
@@ -564,18 +564,22 @@ def glob_escape(path):
     return re.sub(r"([\\*?\[\]])", r"\\\1", path)
 
 
+def under(a, b):
+    """True if the path `a` is `b` or in it, going by the names alone."""
+    return a == b or a.startswith(f"{b}/")
+
+
 def inside(a, b):
     """True if `a`, a realpath, is `b` or in it.  `b` may not exist; its
     symlinks are resolved."""
-    b = os.path.realpath(b)
-    return a == b or a.startswith(f"{b}/")
+    return under(a, os.path.realpath(b))
 
 
 def overlaps(a, b):
     """True if `a`, a realpath, is `b` or in it or contains `b`.  `b` may
     not exist; its symlinks are resolved."""
     b = os.path.realpath(b)
-    return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
+    return under(a, b) or under(b, a)
 
 
 def read_path_file(path):
@@ -635,11 +639,11 @@ def find(*args, quiet=False, cwd=None):
     return [os.fsdecode(entry) for entry in p.stdout.split(b"\0")[:-1]]
 
 
-def name_tests(names, flag="-name"):
+def name_tests(names):
     """The test for find that `names` are, one being enough."""
     tests = []
     for name in names:
-        tests += ["-o", flag, name]
+        tests += ["-o", "-name", name]
     return tests[1:]
 
 
@@ -782,9 +786,9 @@ def lock_work_path(cfg, path):
         other = read_path_file(f)
         if other == path:
             die(f"A session is running in {path}.")
-        if f"{path}/".startswith(f"{other}/"):
+        if under(path, other):
             die(f"Another session works in {other}, which contains {path}.")
-        if f"{other}/".startswith(f"{path}/"):
+        if under(other, path):
             die(f"Another session works in {other}, inside {path}.")
     fd = open_lock(session_lock(cfg, path))
     try:
@@ -797,24 +801,24 @@ def lock_work_path(cfg, path):
     os.close(global_lock)
 
 
-def lock_home(cfg, mode):
-    """Take the lock of the agent's base home, AIHOME, in `mode` "shared"
-    for a project session, which sees it as the lower layer of its
-    overlay, or "exclusive" for a session in it (without -w): a lower
-    layer must not change while it is mounted.  Held until the program
-    exits."""
+def lock_home(cfg, shared):
+    """Take the lock of the agent's base home, AIHOME: `shared` for a
+    project session, which sees it as the lower layer of its overlay, or
+    exclusive for a session in it (without -w): a lower layer must not
+    change while it is mounted.  Held until the program exits."""
+    if shared:
+        how = fcntl.LOCK_SH
+        refusal = "A session in the agent's home (ai without -w) is running: end it first."
+    else:
+        how = fcntl.LOCK_EX
+        refusal = ("Project sessions are running, and the agent's home must not change "
+                   "under them: end them first.")
     os.makedirs(cfg.LOCKDIR, exist_ok=True)
     fd = open_lock(f"{cfg.LOCKDIR}/home.lock")
     try:
-        if mode == "shared":
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, how | fcntl.LOCK_NB)
     except OSError:
-        if mode == "shared":
-            die("A session in the agent's home (ai without -w) is running: end it first.")
-        die("Project sessions are running, and the agent's home must not change "
-            "under them: end them first.")
+        die(refusal)
     HELD_LOCKS.append(fd)
 
 
@@ -833,10 +837,10 @@ def register_project(cfg, path):
         other = read_path_file(f)
         if other == path:
             continue
-        if f"{path}/".startswith(f"{other}/"):
+        if under(path, other):
             die(f"{path} is inside the project {other}: work there, or delete "
                 f"{os.path.dirname(f)}.")
-        if f"{other}/".startswith(f"{path}/"):
+        if under(other, path):
             die(f"{path} contains the project {other}: work there, or delete "
                 f"{os.path.dirname(f)}.")
     project = project_dir(cfg, path)
@@ -954,13 +958,19 @@ def latest(times):
     return max(times, key=lambda t: tuple(map(int, t.split("."))), default="")
 
 
+def trigger_entries(cfg, path, quiet=False):
+    """The triggers under `path`, not looking inside them."""
+    return find(path, "-mindepth", "1", "(", *cfg.trigger_expr, ")", "-prune", "-print0",
+                quiet=quiet)
+
+
 def host_triggers(cfg, path):
     """The triggers in `path`, as a set of (PATH, latest change time of
     their contents).  Change times (ctime), unlike modification times,
     cannot be set back by the sandbox.  The work dir itself isn't one,
     whatever its name."""
     found = set()
-    for item in find(path, "-mindepth", "1", "(", *cfg.trigger_expr, ")", "-prune", "-print0"):
+    for item in trigger_entries(cfg, path):
         name = os.path.basename(item)
         if name == ".git" and os.path.isdir(item):
             # Only what makes Git run code; the objects are data.
@@ -1012,7 +1022,7 @@ class WorkDir:
             inode, links, path = entry.split(" ", 2)
             f = files.setdefault(inode, [int(links), 0, None, None])
             f[1] += 1
-            if any(path == ro or path.startswith(f"{ro}/") for ro in self.ro_paths):
+            if any(under(path, ro) for ro in self.ro_paths):
                 f[3] = f[3] or path
             else:
                 f[2] = f[2] or path
@@ -1056,7 +1066,7 @@ class WorkDir:
         return bool(find(self.path, *self.hidden(), "-name", "*.py", "-print0", "-quit"))
 
 
-def protect_repos(cfg, work, args):
+def protect_repos(work, args):
     """Hide the real .git of each repo in the work dir behind a clone in
     the project's git/, and show the real one read-only under /upstream."""
     path, mount, project = work.path, work.mount, work.project
@@ -1070,7 +1080,7 @@ def protect_repos(cfg, work, args):
         target = git_link_target(f)
         if target.endswith("/.git") or "/.git/" in target:
             warn(f"Not handled (submodule or worktree): {rel_to_pwd(repo)}")
-        elif target == path or target.startswith(f"{path}/"):
+        elif under(target, path):
             warn(f"{rel_to_pwd(f)} points to {rel_to_pwd(target)}, inside the work dir:")
             warn("  that repo's history, config and hooks are NOT protected.")
             if not confirm("  Continue anyway?"):
@@ -1082,12 +1092,12 @@ def protect_repos(cfg, work, args):
     # repos nested in it (Git refuses to clone into a non-empty dir).
     for g in git_repos(path):
         repo = g.removesuffix("/.git")
-        rel = repo[len(path):].removeprefix("/")      # empty for the work dir itself
-        copy = f"{project}/git/{rel}" if rel else f"{project}/git"
+        sub = repo[len(path):]          # "/dir/repo"; empty for the work dir itself
+        copy = f"{project}/git{sub}"
         # Where the sandbox sees your repo: /upstream mirrors the project,
         # with only the .git directories, read-only.  The clone records it
         # as its origin, so it must not change.
-        upstream = f"/upstream/{rel}" if rel else "/upstream"
+        upstream = f"/upstream{sub}"
 
         print(f"Git {RED}{rel_to_pwd(repo)}{NORMAL} → {rel_to_home(copy)}")
 
@@ -1125,7 +1135,7 @@ def protect_repos(cfg, work, args):
             subprocess.run(git_config(config, "remote.ai.tagOpt", "--no-tags"))
             subprocess.run(git_config(config, "fetch.fsckObjects", "true"))
 
-        args += ["--bind", f"{copy}/.git", f"{mount}/{g[len(path) + 1:]}",
+        args += ["--bind", f"{copy}/.git", f"{mount}{sub}/.git",
                  "--ro-bind", g, f"{upstream}/.git"]
 
 
@@ -1180,7 +1190,7 @@ def protect_read_only(cfg, work, patterns, args):
     for pat in patterns:
         if pat.startswith("/"):
             # An absolute path or pattern must be in the work dir.
-            if not f"{pat}/".startswith(f"{path}/"):
+            if not under(pat, path):
                 die(f"--ro: {pat} is not in the work dir ({path}).")
             pat = pat[len(path):].removeprefix("/") or "."
         pat = pat.removesuffix("/").removeprefix("./")
@@ -1196,7 +1206,7 @@ def protect_read_only(cfg, work, patterns, args):
             if os.path.islink(p):
                 warn(f"--ro: symlink skipped: {rel_to_pwd(p)}")
                 continue
-            args += ["--ro-bind", p, mount if p == path else f"{mount}/{p[len(path) + 1:]}"]
+            args += ["--ro-bind", p, f"{mount}{p[len(path):]}"]
             work.ro_paths.append(p)
             kept.append(p)
         if not kept:
@@ -1315,7 +1325,6 @@ class Session:
     cmd: list
     work: WorkDir = None
     tmp: str = None
-    home_args: tuple = ()
     bwrap: subprocess.Popen = None
     agent_pid: int = None
     # The network: slirp4netns, once started, unless the session is ending.
@@ -1369,9 +1378,12 @@ class Session:
                 if "ISDIR" in kind:
                     # A new directory, or one moved in: inotifywait only watches
                     # it once it exists, so what is created in it before is missed.
+                    # Most are still empty: no need to run find on those.
                     try:
-                        found += find(path, "-mindepth", "1", "(", *cfg.trigger_expr, ")",
-                                      "-prune", "-print0", quiet=True)
+                        with os.scandir(path) as entries:
+                            empty = next(entries, None) is None
+                        if not empty:
+                            found += trigger_entries(cfg, path, quiet=True)
                     except OSError:
                         pass            # the report at exit still covers it
                 for p in found:
@@ -1397,14 +1409,16 @@ class Session:
         self.watch_reader = background(self.watch_triggers)
         # inotifywait says so once all the watches are set; on a large tree
         # it takes a while.
-        for _ in range(300):
+        deadline, pause = time.monotonic() + 30, 0.005
+        while time.monotonic() < deadline:
             with open(log, "rb") as f:
                 text = f.read()
             if re.search(rb"^Watches established", text, re.M):
                 return
             if self.watch.poll() is not None:
                 break
-            time.sleep(0.1)
+            time.sleep(pause)
+            pause = min(2 * pause, 0.1)
         warn(f"Watching for new tool files failed or is slow: see {safe(log)}.")
         with open(log, "rb") as f:
             for line in os.fsdecode(f.read()).split("\n"):
@@ -1678,7 +1692,7 @@ def check_session_tools(cfg):
 def check_work_path(cfg, work_path, home):
     if work_path == "/":
         die("Refusing to expose the whole file system.")
-    if f"{home}/".startswith(f"{work_path}/"):
+    if under(home, work_path):
         die(f"Refusing to expose your whole home directory ({work_path}).")
     if f"{work_path}/".startswith(f"{home}/."):
         die(f"Refusing to expose configuration files ({work_path}).")
@@ -1724,9 +1738,11 @@ def confirm_warnings(work):
                 raise Exit(1)
 
 
-def sandbox_args(session, env):
-    """The arguments of bwrap, up to what depends on the work dir."""
-    cfg, tmp, home = session.cfg, session.tmp, os.environ["HOME"]
+def sandbox_args(session, home_args):
+    """The arguments of bwrap, up to what depends on the work dir, but for
+    `home_args`, those mounting the agent's home."""
+    cfg, tmp, env = session.cfg, session.tmp, os.environ
+    home = env["HOME"]
     args = [
         "--die-with-parent",
         "--new-session",
@@ -1760,7 +1776,7 @@ def sandbox_args(session, env):
         # Forbid using `unshare -U` to gain full capabilities in a fresh
         # namespace.
         "--disable-userns",
-        *session.home_args,
+        *home_args,
         "--ro-bind-try", f"{home}/texmf", f"{home}/texmf",
         "--setenv", "HOME", home,
         "--setenv", "USER", env.get("USER", ""),
@@ -1818,9 +1834,9 @@ def write_host_files(tmp):
     write("nsswitch.conf", "passwd: files\ngroup: files\nhosts: files dns\n")
 
 
-def run_session(session, env, work_path):
+def run_session(session):
     """Set up the sandbox and run it; the status of the session."""
-    cfg = session.cfg
+    cfg, work, home = session.cfg, session.work, os.environ["HOME"]
     session.tmp = tempfile.mkdtemp(prefix="ai.")
     write_host_files(session.tmp)
     os.mkfifo(f"{session.tmp}/notify")
@@ -1836,20 +1852,23 @@ def run_session(session, env, work_path):
     if session.ssh:
         start_ssh_agent(session)
 
-    if work_path:
-        project = session.work.project
+    # home_watch is for the report at exit on the agent's home: in a
+    # project, its whole layer (its changes); otherwise, the HOME_TRIGGERS
+    # of the base home.
+    if work:
+        layer = f"{work.project}/home"
         # The base home read-only, under the project's own changes.  The
         # work directory must be on the same file system as the changes.
-        os.makedirs(f"{project}/home", exist_ok=True)
-        os.makedirs(f"{project}/home.work", exist_ok=True)
-        session.home_args = ("--overlay-src", cfg.AIHOME,
-                             "--overlay", f"{project}/home", f"{project}/home.work", env["HOME"])
+        os.makedirs(layer, exist_ok=True)
+        os.makedirs(f"{layer}.work", exist_ok=True)
+        home_args = ["--overlay-src", cfg.AIHOME, "--overlay", layer, f"{layer}.work", home]
+        session.home_watch = (layer,)
     else:
-        session.home_args = ("--bind", f"{cfg.AIHOME}/", f"{env['HOME']}/")
-    args = sandbox_args(session, env)
+        home_args = ["--bind", f"{cfg.AIHOME}/", f"{home}/"]
+        session.home_watch = (cfg.AIHOME, cfg.HOME_TRIGGERS)
+    args = sandbox_args(session, home_args)
 
-    if work_path:
-        work = session.work
+    if work:
         args += [
             "--bind", work.path, work.mount,
             "--chdir", work.mount,
@@ -1862,7 +1881,7 @@ def run_session(session, env, work_path):
         # mounted inside it, and expose what they hide.
         if session.read_only:
             protect_read_only(cfg, work, session.read_only, args)
-        protect_repos(cfg, work, args)
+        protect_repos(work, args)
         protect_tool_files(cfg, work, args)
         confirm_warnings(work)
         warn_about_pycache(cfg, work)
@@ -1882,7 +1901,7 @@ def run_session(session, env, work_path):
     else:
         # No work directory, e.g. to install packages or AI tools in $HOME.
         warn("No work directory: the sandbox starts in the agent's home (-w to work here).")
-        args += ["--chdir", env["HOME"]]
+        args += ["--chdir", home]
 
     # Allocate a pseudo-terminal for bash (so one has job control with
     # Ctrl-Z, fg, bg):
@@ -1890,18 +1909,12 @@ def run_session(session, env, work_path):
 
     session.start_agent_events()
 
-    # For the report at exit on the agent's home: in a project, its whole
-    # layer (its changes); otherwise, the HOME_TRIGGERS of the base home.
-    if work_path:
-        session.home_watch = (f"{session.work.project}/home",)
-    else:
-        session.home_watch = (cfg.AIHOME, cfg.HOME_TRIGGERS)
     session.home_before = home_snapshot(*session.home_watch)
 
     # Your environment variables, as --setenv arguments that bwrap reads
     # from a file in memory, to keep them off its command line.
     env_fd = os.memfd_create("env")
-    for entry in cfg.AI_ENV + (cfg.AI_PROJECT_ENV if work_path else []):
+    for entry in cfg.AI_ENV + (cfg.AI_PROJECT_ENV if work else []):
         name, _, value = entry.partition("=")
         os.write(env_fd, os.fsencode(f"--setenv\0{name}\0{value}\0"))
     os.lseek(env_fd, 0, os.SEEK_SET)
@@ -1935,14 +1948,19 @@ def find_project(cfg):
     return d
 
 
+def current_project(cfg, advice):
+    """The project containing the current directory; without one, refuse
+    to go on, giving `advice`."""
+    path = find_project(cfg)
+    if path is None:
+        die(f"No project here: {advice}")
+    return path
+
+
 def show_home_layer(cfg, layer):
     """Sum up the changes in `layer`, a project's layer of the agent's
-    home, if any.  Overlayfs records deletions as whiteouts: character
-    devices.  Silent: the agent may leave unreadable directories."""
-    found = find(layer, "-mindepth", "1",
-                 "(", "-type", "c", "-printf", "d %P\\0",
-                 "-o", "!", "-type", "d", "-printf", "f %P\\0", ")", quiet=True)
-    summary = summarize_home(cfg, [tuple(entry.split(" ", 1)) for entry in found])
+    home, if any."""
+    summary = summarize_home(cfg, [(kind, path) for kind, _, path in home_snapshot(layer)])
     if not summary:
         return
     print(f"Home layer: {du(layer)}, changes to the agent's home:")
@@ -1996,14 +2014,12 @@ def show_status(cfg, path=None):
     branch names and paths it shows are made safe: they come from the agent.
     Returns the number of branches holding commits you don't have."""
     if path is None:
-        path = find_project(cfg)
-        if path is None:
-            die("No project here: ai -w makes the current directory one.")
+        path = current_project(cfg, "ai -w makes the current directory one.")
     project = project_dir(cfg, path)
     print(f"Project: {rel_to_home(path)}{'' if os.path.isdir(path) else ' (gone)'}")
     print(f"Kept in: {rel_to_home(project)} ({du(project)})")
     lock = session_lock(cfg, path)
-    if os.path.exists(lock) and is_locked(lock):
+    if is_locked(lock):
         print(f"Session: running since {timestamp(os.path.getmtime(lock))}")
     else:
         print("Session: none")
@@ -2012,9 +2028,8 @@ def show_status(cfg, path=None):
     unmerged = 0
     for g in git_repos(f"{project}/git", quiet=True):
         copy = g.removesuffix("/.git")
-        rel = copy[len(f"{project}/git"):].removeprefix("/")
-        repo = f"{path}/{rel}" if rel else path
-        unmerged += show_repo_status(repo, copy, rel)
+        sub = copy[len(f"{project}/git"):]      # "/dir/repo"; empty for the project itself
+        unmerged += show_repo_status(f"{path}{sub}", copy, sub[1:])
 
     show_home_layer(cfg, f"{project}/home")
 
@@ -2085,10 +2100,8 @@ def promote(cfg, paths):
     dropped from the project's layer, which sees the base version again.
     Nothing may run meanwhile: the base home must not change under a
     session, nor a project's layer."""
-    lock_home(cfg, "exclusive")
-    path = find_project(cfg)
-    if path is None:
-        die("No project here: run ai --promote in the project.")
+    lock_home(cfg, shared=False)
+    path = current_project(cfg, "run ai --promote in the project.")
     layer = f"{project_dir(cfg, path)}/home"
     if not os.path.exists(layer):
         die("The agent's home has no changes in this project.")
@@ -2111,8 +2124,8 @@ def promote(cfg, paths):
             ops += sorted(find(src, "!", "-type", "d", "-print0"), key=os.fsencode)
         else:
             ops.append(src)
-    for f in ops:
-        rel = f[len(layer) + 1:]
+    ops = [(f, f[len(layer) + 1:]) for f in ops]    # with its path in the home
+    for f, rel in ops:
         # A symlink planted in the base home must not lead the copy out.
         if not inside(os.path.realpath(os.path.dirname(f"{base}/{rel}")), base):
             die(f"~/AI/home/{rel}: its directory leads out of the base home.")
@@ -2121,8 +2134,7 @@ def promote(cfg, paths):
     if not ops:
         die("Nothing to promote.")
 
-    for f in ops:
-        rel = f[len(layer) + 1:]
+    for f, rel in ops:
         t = f"{base}/{rel}"
         if is_whiteout(f):
             print(f"Delete ~/{safe(rel)}")
@@ -2138,8 +2150,7 @@ def promote(cfg, paths):
     if not confirm("Make this the base version, for every project?"):
         raise Exit(1)
 
-    for f in ops:
-        rel = f[len(layer) + 1:]
+    for f, rel in ops:
         t = f"{base}/{rel}"
         whiteout = is_whiteout(f)
         # rm first: cp would write through a symlink there.
@@ -2165,9 +2176,7 @@ def remove_tree(path):
 def reset_home(cfg):
     """Delete the project's layer of the agent's home, after showing it and
     asking: the project then sees the base home as it is."""
-    path = find_project(cfg)
-    if path is None:
-        die("No project here: run ai --reset in the project.")
+    path = current_project(cfg, "run ai --reset in the project.")
     project = project_dir(cfg, path)
     if not os.path.exists(f"{project}/home"):
         die("The agent's home has no changes in this project.")
@@ -2191,9 +2200,7 @@ def forget(cfg, given):
         if not os.path.isfile(f"{project_dir(cfg, path)}/path"):
             die(f"{given} is not a project (see ai --list).")
     else:
-        path = find_project(cfg)
-        if path is None:
-            die("No project here: run ai --forget in the project, or give its directory.")
+        path = current_project(cfg, "run ai --forget in the project, or give its directory.")
     project = project_dir(cfg, path)
     unmerged = show_status(cfg, path)
     # No session in the project meanwhile, until the program exits.
@@ -2209,7 +2216,7 @@ def forget(cfg, given):
     # Only the remotes leading to this project's clones.
     for g in git_repos(path, quiet=True):
         url = capture(git_config(f"{g}/config", "remote.ai.url")) or ""
-        if url != f"{project}/git" and not url.startswith(f"{project}/git/"):
+        if not under(url, f"{project}/git"):
             continue
         check_plain_config(g)
         repo = g.removesuffix("/.git")
@@ -2236,10 +2243,9 @@ def list_projects(cfg):
     rows = []
     for f in project_path_files(cfg):
         path = read_path_file(f)
-        lock = session_lock(cfg, path)
         if not os.path.isdir(path):
             state = f"gone: ai --forget {rel_to_home(path)}"
-        elif os.path.exists(lock) and is_locked(lock):
+        elif is_locked(session_lock(cfg, path)):
             state = "session running"
         else:
             state = ""
@@ -2257,7 +2263,6 @@ def list_projects(cfg):
 
 @dataclasses.dataclass
 class Options:
-    action: str = None                  # status, promote, reset, forget or list
     work_path: str = None
     ssh: bool = False
     read_only: list = dataclasses.field(default_factory=list)
@@ -2267,7 +2272,9 @@ class Options:
 
 
 def parse_options(argv, action):
-    opts = Options(action=action)
+    """The options of `argv`; `action` is the command it asks for (status,
+    promote, reset, forget or list), if any."""
+    opts = Options()
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -2356,20 +2363,15 @@ def main(argv):
     except OSError:
         die("Cannot resolve $HOME.")
 
-    if action == "status":
-        show_status(cfg)
-        return 0
-    if action == "promote":
-        promote(cfg, opts.promote_paths)
-        return 0
-    if action == "reset":
-        reset_home(cfg)
-        return 0
-    if action == "forget":
-        forget(cfg, opts.forget_dir)
-        return 0
-    if action == "list":
-        list_projects(cfg)
+    commands = {
+        "status": lambda: show_status(cfg),
+        "promote": lambda: promote(cfg, opts.promote_paths),
+        "reset": lambda: reset_home(cfg),
+        "forget": lambda: forget(cfg, opts.forget_dir),
+        "list": lambda: list_projects(cfg),
+    }
+    if action:
+        commands[action]()
         return 0
 
     nft = check_session_tools(cfg)
@@ -2382,7 +2384,7 @@ def main(argv):
         path = opts.work_path
         check_work_path(cfg, path, home)
         # The home lock first: a session refused for it changes nothing.
-        lock_home(cfg, "shared")
+        lock_home(cfg, shared=True)
         lock_work_path(cfg, path)
         # A distinct path per work dir, so that tools keeping per-directory
         # data (history, memory...) tell projects apart.  Mount outside
@@ -2393,11 +2395,11 @@ def main(argv):
     else:
         if opts.read_only:
             die("--ro needs -w: the patterns are in the work directory.")
-        lock_home(cfg, "exclusive")
+        lock_home(cfg, shared=False)
 
     session = Session(cfg, nft, opts.ssh, opts.read_only, opts.cmd, work=work)
     try:
-        return run_session(session, env, opts.work_path)
+        return run_session(session)
     finally:
         session.cleanup()
 
