@@ -347,6 +347,25 @@ class ToolFiles(AiTestCase):
         for rel in (".envrc", ".dir-locals.el", ".npmrc", ".gitattributes", "sub/.vscode"):
             self.assertIn(("--ro-bind", f"{self.work}/{rel}", f"{self.MOUNT}/{rel}"), mounts)
 
+    def test_the_parents_of_protected_entries_are_pinned(self):
+        w, m = self.work, self.MOUNT
+        (w / "a/b").mkdir(parents=True)
+        (w / "a/b/.envrc").touch()
+        (w / "a/.vscode").mkdir()
+        (w / "c/node_modules").mkdir(parents=True)
+        (w / "docs/specs").mkdir(parents=True)
+        (w / ".npmrc").touch()
+        self.make_repo(w / "r/s", commit=False)
+        mounts = self.ai("-w", "--ro", "docs/specs", answers=["y"]).bwrap.mounts()
+        pins = [x for x in mounts if x[0] == "--bind" and x[1].startswith(f"{w}/")
+                and x[2] == f"{m}/{x[1][len(str(w)) + 1:]}"]
+        self.assertEqual([p[1] for p in pins],
+                         [f"{w}/{d}" for d in ("a", "a/b", "c", "docs", "r", "r/s")])
+        # Before what they protect, which they would otherwise cover.
+        for rel in ("a/b/.envrc", "docs/specs", "r/s/.git", "c/node_modules"):
+            protecting = next(i for i, x in enumerate(mounts) if x[2] == f"{m}/{rel}")
+            self.assertLess(max(map(mounts.index, pins)), protecting, rel)
+
     def test_private_directories_are_replaced(self):
         for rel in ("target", "sub/node_modules", ".venv"):
             (self.work / rel).mkdir(parents=True)

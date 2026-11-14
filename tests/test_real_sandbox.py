@@ -107,6 +107,22 @@ class RealSandbox(AiTestCase):
         self.assertDenied("rm .envrc")
         self.assertEqual((self.work / ".envrc").read_text(), "x")
 
+    def test_a_protected_entry_cannot_be_replaced_through_its_parent(self):
+        (self.work / "sub/deep").mkdir(parents=True)
+        (self.work / "sub/deep/.envrc").write_text("mine\n")
+        (self.work / "sub/node_modules").mkdir()
+        (self.work / "docs/specs").mkdir(parents=True)
+        self.make_repo(self.work / "sub/repo")
+        for script in ("mv sub moved", "mv sub/deep sub/moved", "rm -rf sub/deep",
+                       "mv sub/repo sub/moved", "mv docs moved"):
+            self.assertDenied(f"{script} && mkdir -p sub/deep sub/repo/.git docs/specs",
+                              "--ro", "docs/specs", answers=["y"])
+        self.assertEqual((self.work / "sub/deep/.envrc").read_text(), "mine\n")
+        self.assertIn("first", self.git("log", "--oneline", cwd=self.work / "sub/repo"))
+        self.assertEqual(sorted(os.listdir(self.work)), ["docs", "sub"])
+        # The parents stay writable.
+        self.assertOk(self.sandboxed("touch sub/new sub/deep/new docs/new", answers=["y"]))
+
     def test_private_directories_stay_yours(self):
         (self.work / "target").mkdir()
         (self.work / "target/yours").write_text("x")
