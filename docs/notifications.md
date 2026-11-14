@@ -84,11 +84,23 @@ In a file of `~/AI/home/.copilot/hooks/`, say `ai.json`:
 {
   "version": 1,
   "hooks": {
-    "agentStop": [
-      {"type": "command", "bash": "echo stop >\"${AI_NOTIFY:-/dev/null}\""}
-    ],
     "notification": [
-      {"type": "command", "bash": "echo input >\"${AI_NOTIFY:-/dev/null}\""}
+      {
+        "type": "command",
+        "matcher": "^elicitation_dialog$",
+        "bash": "echo elicitation_dialog >\"${AI_NOTIFY:-/dev/null}\""
+      },
+      {
+        "type": "command",
+        "matcher": "^permission_prompt$",
+        "bash": "echo permission_prompt >\"${AI_NOTIFY:-/dev/null}\""
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "echo stop >\"${AI_NOTIFY:-/dev/null}\""
+      }
     ]
   }
 }
