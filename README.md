@@ -615,6 +615,14 @@ Entries the agent creates elsewhere during the session can't be
 protected: they are reported as they appear, and again at exit.
 Symlinks are skipped.
 
+A protected entry, whether a tool file, a repository's `.git` or what
+`--ro` matches, is a mount in the sandbox, and so are the directories
+that lead to it from the top of the work directory. Otherwise the agent
+could rename such a directory, which takes the entry along, create it
+again and put its own version of the entry at the same place. The
+agent can still write in these directories, but not rename or remove
+them.
+
 Inside the sandbox, Python keeps its bytecode in the agent's home
 (`PYTHONPYCACHEPREFIX`) rather than in `__pycache__` directories of
 your tree. That doesn't stop the agent from writing some there on
@@ -880,7 +888,8 @@ untrusted code harmless.
 
 - **Exfiltration.** Whatever the sandbox can read can be sent to the
   internet: the work directory, `~/AI/home` (including the agent's own
-  API key), your TeX files in `~/texmf` and your real `.git` under
+  API key), the variables of `AI_ENV` (a token from `claude
+  setup-token` is long-lived: treat it as an API key), your TeX files in `~/texmf` and your real `.git` under
   `/upstream` (check that your remote URLs in `.git/config` contain no
   tokens).
 - **Your online accounts.** With a claude.ai login, Claude Code also

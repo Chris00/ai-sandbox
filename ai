@@ -1178,6 +1178,26 @@ def protect_tool_files(cfg, work, args):
         work.protected.add(p)
 
 
+def pin_ancestors(work, binds):
+    """Binds onto themselves of the directories of the work dir that lead
+    to the mount points of `binds` (FLAG SOURCE DEST each, DEST in the
+    sandbox), parents first.  A mount protects an entry, not its name:
+    the sandbox could otherwise rename the entry's parent, which takes the
+    entry along, then create the parent again with its own version of the
+    entry, which your tools would then use.  The kernel refuses to rename
+    or remove a mount point.  The directories stay writable."""
+    dirs = set()
+    for _, _, dest in zip(*[iter(binds)] * 3):
+        if under(dest, work.mount):     # the work dir itself has none
+            parts = dest[len(work.mount) + 1:].split("/")
+            dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    args = []
+    # In the order of their bytes, a directory comes before what it holds.
+    for d in sorted(dirs, key=os.fsencode):
+        args += ["--bind", f"{work.path}/{d}", f"{work.mount}/{d}"]
+    return args
+
+
 def protect_read_only(cfg, work, patterns, args):
     """Make what matches `patterns` (see --ro) read-only in the sandbox.
     Only what exists now is protected: files matching a pattern that the
@@ -1876,13 +1896,16 @@ def run_session(session):
             # a project session (e.g. in .bashrc: [ -n "$AI_PROJECT" ]).
             "--setenv", "AI_PROJECT", work.mount,
         ]
-        # Before the other mounts in the work dir: a read-only bind of a
-        # directory would otherwise cover the clones and private copies
-        # mounted inside it, and expose what they hide.
+        # The binds that protect parts of the work dir.  The read-only
+        # patterns first: a read-only bind of a directory would otherwise
+        # cover the clones and private copies mounted inside it, and expose
+        # what they hide.
+        protections = []
         if session.read_only:
-            protect_read_only(cfg, work, session.read_only, args)
-        protect_repos(work, args)
-        protect_tool_files(cfg, work, args)
+            protect_read_only(cfg, work, session.read_only, protections)
+        protect_repos(work, protections)
+        protect_tool_files(cfg, work, protections)
+        args += pin_ancestors(work, protections) + protections
         confirm_warnings(work)
         warn_about_pycache(cfg, work)
         # Snapshots for the checks at exit, taken after protect_repos, whose

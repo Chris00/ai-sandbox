@@ -1137,6 +1137,37 @@ protect_tool_files() {
     done
 }
 
+# pin_ancestors DIR MOUNT BIND...: add to $args the binds onto
+# themselves of the directories under DIR that lead to the mount points
+# of the BINDs (FLAG SOURCE DEST each, DEST in the sandbox, where DIR is
+# mounted at MOUNT), parents first.  A mount protects an entry, not its
+# name: the sandbox could otherwise rename the entry's parent, which
+# takes the entry along, then create the parent again with its own
+# version of the entry, which your tools would then use.  The kernel
+# refuses to rename or remove a mount point.  The directories stay
+# writable.
+pin_ancestors() {
+    local dir=$1 mount=$2 d
+    local -a dirs=()
+    shift 2
+    while [ $# -ge 3 ]; do
+	case $3 in
+	    "$mount"/*)
+		d=${3#"$mount"/}
+		while [[ $d == */* ]]; do
+		    d=${d%/*}
+		    dirs+=("$d")
+		done ;;
+	esac
+	shift 3
+    done
+    [ ${#dirs[@]} -gt 0 ] || return 0
+    # In the order of their bytes, a directory comes before what it holds.
+    while IFS= read -r -d '' d; do
+	args+=(--bind "$dir/$d" "$mount/$d")
+    done < <(printf '%s\0' "${dirs[@]}" | LC_ALL=C sort -zu)
+}
+
 # protect_read_only DIR MOUNT PATTERN...: make what matches the
 # PATTERNs (see --ro) under DIR read-only in the sandbox, where DIR is
 # mounted at MOUNT.  Modify $args.  Only what exists now is protected:
@@ -2084,13 +2115,21 @@ if [ -n "$work_path" ]; then
 	# a project session (e.g. in .bashrc: [ -n "$AI_PROJECT" ]).
 	--setenv AI_PROJECT "$work_mount"
     )
-    # Before the other mounts in the work dir: a read-only bind of a
-    # directory would otherwise cover the clones and private copies
-    # mounted inside it, and expose what they hide.
+    # The binds that protect parts of the work dir, added to $args, then
+    # moved after the binds that pin their parents.  The read-only
+    # patterns first: a read-only bind of a directory would otherwise
+    # cover the clones and private copies mounted inside it, and expose
+    # what they hide.
+    before=${#args[@]}
     [ ${#read_only[@]} -eq 0 ] ||
 	protect_read_only "$work_path" "$work_mount" "${read_only[@]}"
     protect_repos "$work_path" "$work_mount"
     protect_tool_files "$work_path" "$work_mount"
+    protections=("${args[@]:before}")
+    args=("${args[@]:0:before}")
+    pin_ancestors "$work_path" "$work_mount" "${protections[@]}"
+    args+=("${protections[@]}")
+    unset before protections
 
     # The checks on what the sandbox will see of the work dir: after
     # protect_tool_files, which says what it replaces.
