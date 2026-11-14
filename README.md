@@ -86,6 +86,9 @@ The script also checks the host side, before and after each session:
   session changed them (see [The agent's home](#the-agents-home)).
   These warnings are also appended to `~/AI/warnings.log`.
 
+[docs/threat-model.md](docs/threat-model.md) lists these promises, how
+each is kept, and the tests that check it.
+
 
 ## Requirements
 
