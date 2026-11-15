@@ -67,12 +67,18 @@ turn: add it like the others if you want a reminder.
 
 ## Codex CLI
 
-In `~/AI/home/.codex/config.toml`, `notify` runs a command at the end of
-each turn (it receives a description of the turn as its argument, which
-the command below ignores):
+In `~/AI/home/.codex/config.toml`, write:
 
 ```toml
-notify = ["sh", "-c", "echo stop >\"${AI_NOTIFY:-/dev/null}\""]
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "echo stop >\"${AI_NOTIFY:-/dev/null}\""
+
+[[hooks.PermissionRequest]]
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "echo permission_prompt >\"${AI_NOTIFY:-/dev/null}\""
 ```
 
 

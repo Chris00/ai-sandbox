@@ -354,7 +354,7 @@ command line:
 ```bash
 # ~/AI/home/.bashrc
 if [ -n "$AI_PROJECT" ]; then
-    alias codex='codex -c check_for_update_on_startup=false'
+    alias codex='codex -c check_for_update_on_startup=false' --dangerously-bypass-approvals-and-sandbox
 fi
 ```
 
